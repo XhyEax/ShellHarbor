@@ -11,6 +11,7 @@ struct ContentView: View {
     @Environment(RemoteStore.self) private var remoteStore
     @Environment(ImportedKeyStore.self) private var keyStore
     @Environment(KnownHostStore.self) private var knownHostStore
+    @Environment(MobileProxyStore.self) private var proxyStore
     @Environment(\.scenePhase) private var scenePhase
     @State private var selectedTab = IOSRootTab.remotes
     @State private var requestedSessionID: UUID?
@@ -33,6 +34,7 @@ struct ContentView: View {
         .tint(.blue)
         .task {
             remoteStore.restoreSessions(keyStore: keyStore, knownHostStore: knownHostStore)
+            await remoteStore.prewarmTailscale(proxyStore: proxyStore)
             #if DEBUG
             await MobileConnectionSelfTest.runIfRequested()
             #endif

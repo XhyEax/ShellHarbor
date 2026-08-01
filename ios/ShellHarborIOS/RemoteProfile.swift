@@ -210,6 +210,11 @@ final class RemoteStore {
         UserDefaults.standard.set(data, forKey: "mobileRemotes")
     }
 
+    func prewarmTailscale(proxyStore: MobileProxyStore) async {
+        let profiles = remotes.map(proxyStore.resolved)
+        await tailscaleProxyManager.prewarm(profiles)
+    }
+
     func restoreSessions(
         keyStore: ImportedKeyStore,
         knownHostStore: KnownHostStore

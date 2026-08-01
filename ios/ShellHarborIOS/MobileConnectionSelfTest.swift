@@ -72,6 +72,9 @@ enum MobileConnectionSelfTest {
             if let importedKeyStore, let importedKey { try? importedKeyStore.delete(importedKey) }
         }
         let tailscaleProxyManager = MobileTailscaleProxyManager()
+        if environment["SHELLHARBOR_IOS_SELF_TEST_PREWARM"] == "1" {
+            await tailscaleProxyManager.prewarm(runtimeProfiles)
+        }
         var results: [MobileConnectionSelfTestResult] = []
         try? write(results, to: resultPath)
         for profile in runtimeProfiles {
