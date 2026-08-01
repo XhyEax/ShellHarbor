@@ -84,6 +84,7 @@ final class SessionWorkspace: ObservableObject, Identifiable {
 
     private var terminalCancellable: AnyCancellable?
     private var hasLoadedLocalDirectory = false
+    private(set) var hasLoadedRemoteDirectory = false
     private var localLoadGeneration = UUID()
 
     init(
@@ -136,11 +137,21 @@ final class SessionWorkspace: ObservableObject, Identifiable {
 
     func updateProfile(_ profile: SessionProfile) {
         guard profile.id == remoteID else { return }
-        self.profile = profile
+        self.profile.name = profile.name
+        self.profile.accentHex = profile.accentHex
+        self.profile.remoteIcon = profile.remoteIcon
+        self.profile.remoteGroup = profile.remoteGroup
     }
 
     func updateJumpProfile(_ profile: SessionProfile?) {
-        jumpProfile = profile
+        guard
+            let profile,
+            profile.id == jumpProfile?.id
+        else { return }
+        jumpProfile?.name = profile.name
+        jumpProfile?.accentHex = profile.accentHex
+        jumpProfile?.remoteIcon = profile.remoteIcon
+        jumpProfile?.remoteGroup = profile.remoteGroup
     }
 
     func applyRestoration(_ snapshot: RestorableSessionSnapshot) {
@@ -171,6 +182,10 @@ final class SessionWorkspace: ObservableObject, Identifiable {
     func prepareIfNeeded() {
         guard !hasLoadedLocalDirectory else { return }
         reloadLocal()
+    }
+
+    func markRemoteDirectoryLoaded() {
+        hasLoadedRemoteDirectory = true
     }
 
     func rename(to name: String) {

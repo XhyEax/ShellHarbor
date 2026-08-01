@@ -672,6 +672,75 @@ final class SSHCommandBuilderTests: XCTestCase {
         XCTAssertTrue(profile.resolvedTailscaleHostname.hasPrefix("shellharbor-"))
     }
 
+    func testMoshOverTailscaleUsesLocalUDPRelay() throws {
+        var profile = SessionProfile()
+        profile.username = "tester"
+        profile.host = "server.tailnet.ts.net"
+        profile.terminalConnectionMethod = .mosh
+        profile.proxyType = .tailscale
+        profile.tailscaleAuthKey = "test-auth-key"
+        profile.tailscaleMoshPortRange = "60020:60029"
+
+        let invocation = try SSHCommandBuilder.mosh(profile: profile)
+        let command = invocation.arguments.joined(separator: " ")
+
+        XCTAssertTrue(command.contains("--port=60020:60029"))
+        XCTAssertTrue(command.contains("MOSH IP 127.0.0.1"))
+        XCTAssertTrue(command.contains("exec mosh-server"))
+    }
+
+    func testSavedProxyCanBeReusedByAnotherRemote() {
+        var source = SessionProfile()
+        source.proxyType = .tailscale
+        source.proxyPort = 5_140
+        source.tailscaleAuthKey = "test-auth-key"
+        source.tailscaleLoginServer = "https://login.example.com"
+        source.tailscaleHostname = "shellharbor-shared"
+        let saved = NetworkProxyProfile(name: "共享网络", from: source)
+
+        let target = saved.applying(to: SessionProfile())
+
+        XCTAssertEqual(target.savedProxyID, saved.id)
+        XCTAssertEqual(target.resolvedProxyType, .tailscale)
+        XCTAssertEqual(target.resolvedProxyPort, 5_140)
+        XCTAssertEqual(target.tailscaleAuthKey, "test-auth-key")
+        XCTAssertEqual(target.tailscaleLoginServer, "https://login.example.com")
+        XCTAssertEqual(target.resolvedTailscaleHostname, "shellharbor-shared")
+    }
+
+    func testDefaultTailscaleNodeNameIsSharedAcrossRemotes() {
+        var first = SessionProfile()
+        first.proxyType = .tailscale
+        var second = SessionProfile()
+        second.proxyType = .tailscale
+
+        XCTAssertEqual(
+            first.resolvedTailscaleHostname,
+            second.resolvedTailscaleHostname
+        )
+        XCTAssertTrue(first.resolvedTailscaleHostname.hasPrefix("shellharbor-"))
+    }
+
+    func testTailscaleLoginServerAddsHTTPSWhenSchemeIsMissing() {
+        XCTAssertEqual(
+            TailscaleLoginServer.normalized("login.example.com"),
+            "https://login.example.com"
+        )
+        XCTAssertEqual(
+            TailscaleLoginServer.normalized("http://login.example.com"),
+            "http://login.example.com"
+        )
+        XCTAssertNil(TailscaleLoginServer.normalized("  "))
+        XCTAssertEqual(
+            TailscaleLoginServer.displayName("login.example.com"),
+            "login.example.com"
+        )
+        XCTAssertEqual(
+            TailscaleLoginServer.displayName("https://login.example.com"),
+            "login.example.com"
+        )
+    }
+
     func testHTTPConnectProxyIsAppliedToSCP() throws {
         var profile = SessionProfile()
         profile.host = "private.internal"
@@ -1574,6 +1643,28 @@ final class SSHCommandBuilderTests: XCTestCase {
 
         XCTAssertEqual(workspace.profile.name, "After")
         XCTAssertEqual(workspace.displayName, "After · 1")
+    }
+
+    @MainActor
+    func testOpenWorkspaceKeepsItsActualConnectionConfiguration() {
+        var original = SessionProfile()
+        original.name = "Remote"
+        original.host = "old.example.com"
+        original.terminalConnectionMethod = .ssh
+        let workspace = SessionWorkspace(profile: original)
+
+        var edited = original
+        edited.name = "Renamed"
+        edited.host = "new.example.com"
+        edited.terminalConnectionMethod = .mosh
+        workspace.updateProfile(edited)
+
+        XCTAssertEqual(workspace.profile.name, "Renamed")
+        XCTAssertEqual(workspace.profile.host, "old.example.com")
+        XCTAssertEqual(workspace.profile.resolvedTerminalConnectionMethod, .ssh)
+        XCTAssertFalse(workspace.hasLoadedRemoteDirectory)
+        workspace.markRemoteDirectoryLoaded()
+        XCTAssertTrue(workspace.hasLoadedRemoteDirectory)
     }
 
     @MainActor

@@ -128,6 +128,37 @@ final class ShellHarborCLIKitTests: XCTestCase {
         XCTAssertFalse(command.contains("test-auth-key"))
     }
 
+    func testCLIMoshBuildUsesTailscaleUDPRelay() throws {
+        let object: [String: Any] = [
+            "id": "11111111-1111-1111-1111-111111111111",
+            "name": "Tailnet Mosh",
+            "host": "100.64.0.3",
+            "username": "deploy",
+            "terminalConnectionMethod": "mosh",
+            "proxyType": "tailscale",
+            "proxyPort": 15_040
+        ]
+        let remote = try JSONDecoder().decode(
+            SHRemoteProfile.self,
+            from: JSONSerialization.data(withJSONObject: object)
+        )
+
+        let invocation = try SHSSHCommandBuilder.buildMosh(
+            profile: remote,
+            jumpProfile: nil,
+            targetPasswordDescriptor: nil,
+            jumpPasswordDescriptor: nil,
+            tailscaleClientPath: "/tmp/tailscale-mosh-client"
+        )
+
+        XCTAssertTrue(remote.prefersMosh)
+        XCTAssertTrue(
+            invocation.arguments.contains(where: {
+                $0.contains("tailscale-mosh-client")
+            })
+        )
+    }
+
     func testPasswordPipeContainsPasswordOnlyInAnonymousDescriptor() throws {
         let pipe = try SHPasswordPipe(password: "pipe-secret")
         let data = FileHandle(

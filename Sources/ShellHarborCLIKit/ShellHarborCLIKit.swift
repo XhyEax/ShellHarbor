@@ -53,17 +53,39 @@ public enum SHCLIError: LocalizedError {
     }
 }
 
+private final class SHRelayResultBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Result<String, Error>?
+
+    func set(_ value: Result<String, Error>) {
+        lock.lock()
+        self.value = value
+        lock.unlock()
+    }
+
+    func get() -> Result<String, Error>? {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+}
+
 public final class SHTailscaleProxyProcess {
     private struct Ready: Decodable {
         let type: String
         let host: String
         let port: Int
+        let controlPort: Int
     }
 
     private let process: Process
+    public let port: Int
+    private let controlPort: Int
 
-    private init(process: Process) {
+    private init(process: Process, port: Int, controlPort: Int) {
         self.process = process
+        self.port = port
+        self.controlPort = controlPort
     }
 
     deinit {
@@ -95,11 +117,6 @@ public final class SHTailscaleProxyProcess {
             at: stateDirectory,
             withIntermediateDirectories: true
         )
-        let port = profile.proxyPort ?? 5_040
-        guard (1...65_535).contains(port) else {
-            throw SHCLIError.invalidProxy(profile.name)
-        }
-
         let process = Process()
         let input = Pipe()
         let output = Pipe()
@@ -108,7 +125,7 @@ public final class SHTailscaleProxyProcess {
         process.arguments = [
             "--hostname", profile.resolvedTailscaleHostname,
             "--state-dir", stateDirectory.path,
-            "--listen", "127.0.0.1:\(port)",
+            "--listen-start", "15040",
             "--parent-pid", String(ProcessInfo.processInfo.processIdentifier),
             "--login-server", profile.tailscaleLoginServer ?? ""
         ]
@@ -123,7 +140,7 @@ public final class SHTailscaleProxyProcess {
             let ready = try? JSONDecoder().decode(Ready.self, from: data),
             ready.type == "ready",
             ready.host == "127.0.0.1",
-            ready.port == port
+            (15_040...65_535).contains(ready.port)
         else {
             let detail = String(
                 decoding: errors.fileHandleForReading.availableData,
@@ -134,13 +151,69 @@ public final class SHTailscaleProxyProcess {
                 detail.isEmpty ? "helper 未返回就绪状态" : detail
             )
         }
-        return SHTailscaleProxyProcess(process: process)
+        return SHTailscaleProxyProcess(
+            process: process,
+            port: ready.port,
+            controlPort: ready.controlPort
+        )
+    }
+
+    public func prepareMoshRelay(target: String) throws -> String {
+        struct Request: Encodable { let target: String }
+        struct Response: Decodable { let start: Int; let end: Int }
+        let url = URL(string: "http://127.0.0.1:\(controlPort)/udp-relay")!
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(Request(target: target))
+        let semaphore = DispatchSemaphore(value: 0)
+        let result = SHRelayResultBox()
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            defer { semaphore.signal() }
+            if let error {
+                result.set(.failure(error))
+                return
+            }
+            guard
+                (response as? HTTPURLResponse)?.statusCode == 200,
+                let data,
+                let relay = try? JSONDecoder().decode(Response.self, from: data)
+            else {
+                result.set(.failure(
+                    SHCLIError.tailscaleStartupFailed("无法创建 Mosh UDP relay")
+                ))
+                return
+            }
+            result.set(.success("\(relay.start):\(relay.end)"))
+        }.resume()
+        semaphore.wait()
+        return try result.get()!.get()
+    }
+
+    public func configureMoshClient(target: String) throws -> String {
+        guard
+            let executable = Bundle.main.executableURL
+        else { throw SHCLIError.tailscaleHelperUnavailable }
+        let client = executable.resolvingSymlinksInPath()
+            .deletingLastPathComponent()
+            .appendingPathComponent("tailscale-mosh-client")
+        guard FileManager.default.isExecutableFile(atPath: client.path) else {
+            throw SHCLIError.tailscaleHelperUnavailable
+        }
+        setenv(
+            "SHELLHARBOR_TAILSCALE_CONTROL_PORT",
+            String(controlPort),
+            1
+        )
+        setenv("SHELLHARBOR_TAILSCALE_TARGET", target, 1)
+        return client.path
     }
 
     private static func helperURL() throws -> URL {
         let fileManager = FileManager.default
         if let executable = Bundle.main.executableURL {
-            let sibling = executable.deletingLastPathComponent()
+            let sibling = executable.resolvingSymlinksInPath()
+                .deletingLastPathComponent()
                 .appendingPathComponent("tailscale-proxy-helper")
             if fileManager.isExecutableFile(atPath: sibling.path) {
                 return sibling
@@ -170,11 +243,15 @@ public struct SHRemoteProfile: Decodable, Identifiable {
     public let remoteGroup: String?
     public let jumpRemoteID: UUID?
     public let sshJumpMode: String?
+    public let savedProxyID: UUID?
     public let proxyType: String?
     public let proxyHost: String?
-    public let proxyPort: Int?
+    public var proxyPort: Int?
     public let tailscaleLoginServer: String?
     public let tailscaleHostname: String?
+    public let terminalConnectionMethod: String?
+    public let moshCommand: String?
+    public let moshServerCommand: String?
 
     public var resolvedHost: String {
         let value = (host ?? "").trimmingCharacters(
@@ -217,6 +294,10 @@ public struct SHRemoteProfile: Decodable, Identifiable {
 
     public var usesTailscaleProxy: Bool {
         proxyType == "tailscale"
+    }
+
+    public var prefersMosh: Bool {
+        terminalConnectionMethod == "mosh"
     }
 
     public var resolvedTailscaleHostname: String {
@@ -476,6 +557,51 @@ public enum SHSSHCommandBuilder {
         )
     }
 
+    public static func buildMosh(
+        profile: SHRemoteProfile,
+        jumpProfile: SHRemoteProfile?,
+        targetPasswordDescriptor: Int32?,
+        jumpPasswordDescriptor: Int32?,
+        tailscaleClientPath: String?
+    ) throws -> SHSSHInvocation {
+        guard profile.isConnectable else {
+            throw SHCLIError.invalidRemote(profile.name)
+        }
+        var sshArguments = commonArguments(for: profile)
+        sshArguments += try routeArguments(
+            profile: profile,
+            jumpProfile: jumpProfile,
+            jumpPasswordDescriptor: jumpPasswordDescriptor
+        )
+        var ssh = ["/usr/bin/ssh"] + sshArguments
+        if profile.usesPassword {
+            guard
+                let targetPasswordDescriptor,
+                let sshpass = sshpassPath()
+            else { throw SHCLIError.sshpassUnavailable }
+            ssh = [sshpass, "-d", String(targetPasswordDescriptor)] + ssh
+        }
+        let sshCommand = ssh.map(shellQuote).joined(separator: " ")
+        let configuredMosh = (profile.moshCommand ?? "").trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        let mosh = configuredMosh.isEmpty ? "/opt/homebrew/bin/mosh" : configuredMosh
+        var arguments = [
+            "--experimental-remote-ip=remote",
+            "--ssh=\(sshCommand)"
+        ]
+        if let tailscaleClientPath {
+            arguments.append("--client=\(tailscaleClientPath)")
+        }
+        let configuredServer = (profile.moshServerCommand ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !configuredServer.isEmpty {
+            arguments.append("--server=\(configuredServer)")
+        }
+        arguments += ["--", "\(profile.resolvedUsername)@\(profile.resolvedHost)"]
+        return SHSSHInvocation(executablePath: mosh, arguments: arguments)
+    }
+
     /// Bash login shells do not normally source ~/.bashrc. shcli explicitly
     /// loads it for bash while retaining the account's configured shell.
     static let interactiveLoginCommand = """
@@ -593,7 +719,7 @@ public enum SHSSHCommandBuilder {
             )
         let defaultPort = type == "socks5"
             ? 1_080
-            : (type == "tailscale" ? 5_040 : 8_080)
+            : (type == "tailscale" ? 15_040 : 8_080)
         let port = profile.proxyPort ?? defaultPort
         guard
             !host.isEmpty,

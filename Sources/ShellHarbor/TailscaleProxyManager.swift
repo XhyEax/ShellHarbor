@@ -1,9 +1,11 @@
+import CryptoKit
 import Foundation
 
 struct TailscaleProxyReadyMessage: Decodable {
     let type: String
     let host: String
     let port: Int
+    let controlPort: Int
 }
 
 enum TailscaleProxyError: LocalizedError {
@@ -28,19 +30,24 @@ final class TailscaleProxyManager {
     private struct Instance {
         let process: Process
         let port: Int
+        let controlPort: Int
     }
 
-    private var instances: [UUID: Instance] = [:]
+    private var instances: [String: Instance] = [:]
+    private var startingKeys = Set<String>()
+    private var relayRanges: [String: String] = [:]
 
-    func ensureRunning(for profile: SessionProfile) async throws {
-        guard profile.resolvedProxyType == .tailscale else { return }
-        if let instance = instances[profile.id], instance.process.isRunning {
-            guard instance.port == profile.resolvedProxyPort else {
-                instance.process.terminate()
-                instances.removeValue(forKey: profile.id)
-                return try await ensureRunning(for: profile)
+    func ensureRunning(for profile: SessionProfile) async throws -> Int? {
+        guard profile.resolvedProxyType == .tailscale else { return nil }
+        let instanceKey = instanceKey(for: profile)
+        if let instance = instances[instanceKey], instance.process.isRunning {
+            return instance.port
+        }
+        if startingKeys.contains(instanceKey) {
+            while startingKeys.contains(instanceKey) {
+                try await Task.sleep(for: .milliseconds(50))
             }
-            return
+            return try await ensureRunning(for: profile)
         }
         guard
             profile.isProxyConfigurationValid,
@@ -51,13 +58,20 @@ final class TailscaleProxyManager {
         else {
             throw TailscaleProxyError.invalidConfiguration
         }
+        startingKeys.insert(instanceKey)
+        defer { startingKeys.remove(instanceKey) }
         let helper = try helperURL()
         let stateDirectory = FileManager.default.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask
         )[0]
         .appendingPathComponent("ShellHarbor/Tailscale", isDirectory: true)
-        .appendingPathComponent(profile.id.uuidString, isDirectory: true)
+        .appendingPathComponent(
+            SHA256.hash(data: Data(instanceKey.utf8))
+                .map { String(format: "%02x", $0) }
+                .joined(),
+            isDirectory: true
+        )
         try FileManager.default.createDirectory(
             at: stateDirectory,
             withIntermediateDirectories: true
@@ -71,7 +85,7 @@ final class TailscaleProxyManager {
         process.arguments = [
             "--hostname", profile.resolvedTailscaleHostname,
             "--state-dir", stateDirectory.path,
-            "--listen", "127.0.0.1:\(profile.resolvedProxyPort)",
+            "--listen-start", "15040",
             "--parent-pid", String(ProcessInfo.processInfo.processIdentifier),
             "--login-server", profile.tailscaleLoginServer ?? ""
         ]
@@ -91,19 +105,81 @@ final class TailscaleProxyManager {
             guard
                 ready.type == "ready",
                 ready.host == "127.0.0.1",
-                ready.port == profile.resolvedProxyPort
+                (15_040...65_535).contains(ready.port)
             else {
                 process.terminate()
                 throw TailscaleProxyError.startupFailed("helper 返回了无效地址")
             }
-            instances[profile.id] = Instance(
+            instances[instanceKey] = Instance(
                 process: process,
-                port: ready.port
+                port: ready.port,
+                controlPort: ready.controlPort
             )
+            return ready.port
         } catch {
             if process.isRunning { process.terminate() }
             throw error
         }
+    }
+
+    func prepareMoshRelay(
+        proxyProfile: SessionProfile,
+        targetHost: String
+    ) async throws -> String {
+        _ = try await ensureRunning(for: proxyProfile)
+        let key = instanceKey(for: proxyProfile)
+        let relayKey = "\(key)|\(targetHost)"
+        if let existing = relayRanges[relayKey] {
+            return existing
+        }
+        guard let instance = instances[key], instance.process.isRunning else {
+            throw TailscaleProxyError.startupFailed("Tailscale helper 未运行")
+        }
+        struct Request: Encodable { let target: String }
+        struct Response: Decodable { let start: Int; let end: Int }
+        var request = URLRequest(
+            url: URL(string: "http://127.0.0.1:\(instance.controlPort)/udp-relay")!
+        )
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(Request(target: targetHost))
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard
+            (response as? HTTPURLResponse)?.statusCode == 200,
+            let relay = try? JSONDecoder().decode(Response.self, from: data)
+        else {
+            throw TailscaleProxyError.startupFailed("无法创建 Mosh UDP relay")
+        }
+        let range = "\(relay.start):\(relay.end)"
+        relayRanges[relayKey] = range
+        return range
+    }
+
+    func moshRelayConfiguration(
+        for proxyProfile: SessionProfile
+    ) async throws -> (controlPort: Int, clientPath: String) {
+        _ = try await ensureRunning(for: proxyProfile)
+        let key = instanceKey(for: proxyProfile)
+        guard let instance = instances[key], instance.process.isRunning else {
+            throw TailscaleProxyError.startupFailed("Tailscale helper 未运行")
+        }
+        let helper = try helperURL()
+        let client = helper.deletingLastPathComponent()
+            .appendingPathComponent("tailscale-mosh-client")
+        guard FileManager.default.isExecutableFile(atPath: client.path) else {
+            throw TailscaleProxyError.helperUnavailable
+        }
+        return (instance.controlPort, client.path)
+    }
+
+    private func instanceKey(for profile: SessionProfile) -> String {
+        [
+            profile.savedProxyID?.uuidString ?? "standalone",
+            profile.resolvedTailscaleHostname,
+            (profile.tailscaleLoginServer ?? "").trimmingCharacters(
+                in: .whitespacesAndNewlines
+            )
+        ].joined(separator: "|")
     }
 
     private func waitUntilReady(

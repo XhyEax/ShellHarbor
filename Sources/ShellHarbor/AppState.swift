@@ -11,6 +11,7 @@ final class AppState: ObservableObject {
     /// Persisted Remote definitions. The historical property name is kept to
     /// avoid a migration of the on-disk JSON format.
     @Published var sessions: [SessionProfile]
+    @Published private(set) var savedProxies: [NetworkProxyProfile]
     @Published var selectedSessionID: UUID?
     @Published var editingSession: SessionProfile?
     @Published var showingSessionEditor = false
@@ -136,6 +137,7 @@ final class AppState: ObservableObject {
     init() {
         let loaded = SessionStore.load()
         sessions = loaded
+        savedProxies = NetworkProxyStore.load()
         localShell = .saved
         selectedSessionID = loaded.first?.id ?? localRemoteID
         for profile in loaded {
@@ -189,12 +191,27 @@ final class AppState: ObservableObject {
     func saveEditedSession(_ draft: SessionProfile) {
         var profile = draft
         profile.host = draft.resolvedHost
+        if
+            profile.resolvedProxyType == .tailscale,
+            (profile.tailscaleHostname ?? "").trimmingCharacters(
+                in: .whitespacesAndNewlines
+            ).isEmpty
+        {
+            profile.tailscaleHostname = TailscaleNodeIdentity.name
+        }
+        if profile.resolvedProxyType == .tailscale {
+            profile.tailscaleLoginServer = TailscaleLoginServer.normalized(
+                profile.tailscaleLoginServer
+            )
+        }
         profile.remoteGroup = RemoteGroupName.normalized(
             draft.remoteGroup
         )
         if profile.isProxyEnabled {
             profile.proxyHost = draft.resolvedProxyHost
-            profile.proxyPort = draft.resolvedProxyPort
+            profile.proxyPort = profile.resolvedProxyType == .tailscale
+                ? SSHProxyType.tailscale.defaultPort
+                : draft.resolvedProxyPort
         }
         if
             profile.jumpRemoteID == profile.id ||
@@ -237,6 +254,62 @@ final class AppState: ObservableObject {
         showingSessionEditor = false
     }
 
+    @discardableResult
+    func saveProxy(
+        named name: String,
+        from draft: SessionProfile
+    ) -> NetworkProxyProfile? {
+        let normalized = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty, draft.isProxyConfigurationValid else {
+            return nil
+        }
+        var normalizedDraft = draft
+        if
+            normalizedDraft.resolvedProxyType == .tailscale,
+            (normalizedDraft.tailscaleHostname ?? "").trimmingCharacters(
+                in: .whitespacesAndNewlines
+            ).isEmpty
+        {
+            normalizedDraft.tailscaleHostname = TailscaleNodeIdentity.name
+        }
+        if normalizedDraft.resolvedProxyType == .tailscale {
+            normalizedDraft.tailscaleLoginServer =
+                TailscaleLoginServer.normalized(
+                    normalizedDraft.tailscaleLoginServer
+                )
+        }
+        var proxy = NetworkProxyProfile(name: normalized, from: normalizedDraft)
+        let matchingID = draft.savedProxyID ?? savedProxies.first(where: {
+            $0.name.caseInsensitiveCompare(normalized) == .orderedSame
+        })?.id
+        if
+            let existingID = matchingID,
+            let index = savedProxies.firstIndex(where: { $0.id == existingID })
+        {
+            proxy.id = existingID
+            savedProxies[index] = proxy
+            for sessionIndex in sessions.indices where
+                sessions[sessionIndex].savedProxyID == existingID
+            {
+                sessions[sessionIndex] = proxy.applying(to: sessions[sessionIndex])
+            }
+            SessionStore.save(sessions)
+            for workspace in activeWorkspaces {
+                guard
+                    let current = sessions.first(where: {
+                        $0.id == workspace.remoteID
+                    })
+                else { continue }
+                workspace.updateProfile(current)
+                workspace.updateJumpProfile(jumpProfile(for: current))
+            }
+        } else {
+            savedProxies.append(proxy)
+        }
+        NetworkProxyStore.save(savedProxies)
+        return proxy
+    }
+
     func duplicateSelectedSession() {
         guard var copy = selectedSession else { return }
         copy.id = UUID()
@@ -246,6 +319,28 @@ final class AppState: ObservableObject {
         selectedSessionID = copy.id
         SessionStore.save(sessions)
         scheduleInspection(for: copy, runImmediately: true)
+    }
+
+    func setDefaultConnectionMethod(
+        _ method: TerminalConnectionMethod,
+        for remoteID: UUID
+    ) {
+        guard let index = sessions.firstIndex(where: { $0.id == remoteID }) else {
+            return
+        }
+        if method == .jumpMosh, sessions[index].jumpRemoteID == nil {
+            return
+        }
+        sessions[index].terminalConnectionMethod = method
+        switch method {
+        case .ssh:
+            sessions[index].moshJumpMode = nil
+        case .mosh:
+            sessions[index].moshJumpMode = .directTarget
+        case .jumpMosh:
+            sessions[index].moshJumpMode = .moshOnJump
+        }
+        SessionStore.save(sessions)
     }
 
     func deleteSelectedSession() {
@@ -349,16 +444,24 @@ final class AppState: ObservableObject {
     private func performInspection(remoteID: UUID) async {
         guard
             !inspectingRemoteIDs.contains(remoteID),
-            let profile = sessions.first(where: { $0.id == remoteID })
+            var profile = sessions.first(where: { $0.id == remoteID })
         else {
             return
         }
         inspectingRemoteIDs.insert(remoteID)
+        var jump = jumpProfile(for: profile)
         do {
-            if let jump = jumpProfile(for: profile) {
-                try await tailscaleProxyManager.ensureRunning(for: jump)
-            } else {
-                try await tailscaleProxyManager.ensureRunning(for: profile)
+            if var routingJump = jump {
+                if let port = try await tailscaleProxyManager.ensureRunning(
+                    for: routingJump
+                ) {
+                    routingJump.proxyPort = port
+                    jump = routingJump
+                }
+            } else if let port = try await tailscaleProxyManager.ensureRunning(
+                for: profile
+            ) {
+                profile.proxyPort = port
             }
         } catch {
             inspectingRemoteIDs.remove(remoteID)
@@ -366,7 +469,7 @@ final class AppState: ObservableObject {
         }
         let record = await InspectionService.inspect(
             profile: profile,
-            jumpProfile: jumpProfile(for: profile)
+            jumpProfile: jump
         )
         inspectingRemoteIDs.remove(remoteID)
 
@@ -668,15 +771,32 @@ final class AppState: ObservableObject {
         workspace.terminal.beginPreparingConnection()
         Task { [weak self, weak workspace] in
             guard let self, let workspace else { return }
+            var profile = workspace.profile
+            var jumpProfile = workspace.jumpProfile
             do {
-                if let jumpProfile = workspace.jumpProfile {
-                    try await tailscaleProxyManager.ensureRunning(
-                        for: jumpProfile
-                    )
-                } else {
-                    try await tailscaleProxyManager.ensureRunning(
-                        for: workspace.profile
-                    )
+                if var routingJump = jumpProfile {
+                    if let port = try await tailscaleProxyManager.ensureRunning(
+                        for: routingJump
+                    ) {
+                        routingJump.proxyPort = port
+                        jumpProfile = routingJump
+                    }
+                } else if let port = try await tailscaleProxyManager.ensureRunning(
+                    for: profile
+                ) {
+                    profile.proxyPort = port
+                }
+                if
+                    profile.isMoshConnection,
+                    profile.resolvedMoshJumpMode != .moshOnJump
+                {
+                    let routingProxy = jumpProfile ?? profile
+                    if routingProxy.resolvedProxyType == .tailscale {
+                        let relay = try await tailscaleProxyManager
+                            .moshRelayConfiguration(for: routingProxy)
+                        profile.tailscaleMoshControlPort = relay.controlPort
+                        profile.tailscaleMoshClientPath = relay.clientPath
+                    }
                 }
             } catch {
                 workspace.terminal.failPreparingConnection(
@@ -689,30 +809,13 @@ final class AppState: ObservableObject {
                 inspectNow(workspace.remoteID)
             }
             workspace.terminal.connect(
-                profile: workspace.profile,
-                jumpProfile: workspace.jumpProfile,
+                profile: profile,
+                jumpProfile: jumpProfile,
                 startupCommand: workspace.multiplexer?.startupCommand(
                     sessionName: workspace.sessionLabel
                 )
             )
             workspace.terminal.startProcessIfNeeded()
-            guard !workspace.profile.isLocalConnection else { return }
-            let defaultRemotePath =
-                workspace.profile.resolvedRemoteFilePath
-            let hasRememberedPath =
-                workspace.remotePath != defaultRemotePath
-            let restored = await refreshRemote(
-                workspace: workspace,
-                profile: workspace.profile,
-                reportErrors: !hasRememberedPath
-            )
-            if !restored && hasRememberedPath {
-                workspace.remotePath = defaultRemotePath
-                await refreshRemote(
-                    workspace: workspace,
-                    profile: workspace.profile
-                )
-            }
         }
     }
 
@@ -892,12 +995,50 @@ final class AppState: ObservableObject {
         in workspace: SessionWorkspace
     ) async {
         workspace.reloadLocal(preservingSelection: true)
+        guard workspace.terminal.state == .connected else { return }
+        if !workspace.hasLoadedRemoteDirectory {
+            await loadRemoteFilesIfNeeded(in: workspace)
+            return
+        }
         guard !workspace.isLoadingRemote else { return }
         _ = await refreshRemote(
             workspace: workspace,
             profile: workspace.profile,
             preservingSelection: true
         )
+    }
+
+    func loadRemoteFilesIfNeeded(in workspace: SessionWorkspace) async {
+        guard
+            !workspace.profile.isLocalConnection,
+            workspace.terminal.state == .connected,
+            !workspace.hasLoadedRemoteDirectory,
+            !workspace.isLoadingRemote
+        else { return }
+        // Avoid racing the independent file-service SSH process against the
+        // interactive SSH handshake that has just started.
+        try? await Task.sleep(for: .milliseconds(500))
+        guard workspace.terminal.state == .connected else { return }
+        let defaultPath = workspace.profile.resolvedRemoteFilePath
+        let hasRememberedPath = workspace.remotePath != defaultPath
+        let restored = await refreshRemote(
+            workspace: workspace,
+            profile: workspace.profile,
+            reportErrors: false
+        )
+        if restored {
+            workspace.markRemoteDirectoryLoaded()
+        } else if hasRememberedPath {
+            workspace.remotePath = defaultPath
+            let fallbackLoaded = await refreshRemote(
+                workspace: workspace,
+                profile: workspace.profile,
+                reportErrors: false
+            )
+            if fallbackLoaded {
+                workspace.markRemoteDirectoryLoaded()
+            }
+        }
     }
 
     func navigateLocal(to rawPath: String, in workspace: SessionWorkspace) {

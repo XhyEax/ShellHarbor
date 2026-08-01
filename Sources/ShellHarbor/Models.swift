@@ -127,8 +127,45 @@ enum SSHProxyType: String, Codable, CaseIterable, Identifiable {
         case .none: 0
         case .socks5: 1080
         case .httpConnect: 8080
-        case .tailscale: 5040
+        case .tailscale: 15_040
         }
+    }
+}
+
+enum TailscaleNodeIdentity {
+    private static let defaultsKey = "tailscaleDefaultNodeName"
+
+    static var name: String {
+        if
+            let saved = UserDefaults.standard.string(forKey: defaultsKey),
+            !saved.isEmpty
+        {
+            return saved
+        }
+        let generated = "shellharbor-\(UUID().uuidString.lowercased().prefix(8))"
+        UserDefaults.standard.set(generated, forKey: defaultsKey)
+        return generated
+    }
+}
+
+enum TailscaleLoginServer {
+    static func normalized(_ value: String?) -> String? {
+        let trimmed = (value ?? "").trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        guard !trimmed.isEmpty else { return nil }
+        guard !trimmed.contains("://") else { return trimmed }
+        return "https://\(trimmed)"
+    }
+
+    static func displayName(_ value: String?) -> String? {
+        guard let normalized = normalized(value) else { return nil }
+        for prefix in ["https://", "http://"] where
+            normalized.lowercased().hasPrefix(prefix)
+        {
+            return String(normalized.dropFirst(prefix.count))
+        }
+        return normalized
     }
 }
 
@@ -466,12 +503,17 @@ struct SessionProfile: Identifiable, Codable, Equatable {
     var inspectionIntervalMinutes: Int?
     var jumpRemoteID: UUID?
     var sshJumpMode: SSHJumpMode?
+    var savedProxyID: UUID?
     var proxyType: SSHProxyType?
     var proxyHost: String?
     var proxyPort: Int?
     var tailscaleAuthKey: String?
     var tailscaleLoginServer: String?
     var tailscaleHostname: String?
+    /// Runtime-only Mosh UDP relay range assigned by TailscaleProxyManager.
+    var tailscaleMoshPortRange: String?
+    var tailscaleMoshControlPort: Int?
+    var tailscaleMoshClientPath: String?
     var terminalConnectionMethod: TerminalConnectionMethod?
     var moshCommand: String?
     var moshServerCommand: String?
@@ -603,7 +645,10 @@ struct SessionProfile: Identifiable, Codable, Equatable {
         !isProxyEnabled ||
         (
             !resolvedProxyHost.isEmpty &&
-            (1...65535).contains(resolvedProxyPort) &&
+            (
+                resolvedProxyType == .tailscale ||
+                (1...65535).contains(resolvedProxyPort)
+            ) &&
             (
                 resolvedProxyType != .tailscale ||
                 !(tailscaleAuthKey ?? "").trimmingCharacters(
@@ -617,7 +662,7 @@ struct SessionProfile: Identifiable, Codable, Equatable {
         let value = (tailscaleHostname ?? "").trimmingCharacters(
             in: .whitespacesAndNewlines
         )
-        return value.isEmpty ? "shellharbor-\(id.uuidString.lowercased().prefix(8))" : value
+        return value.isEmpty ? TailscaleNodeIdentity.name : value
     }
 
     var proxySummary: String? {

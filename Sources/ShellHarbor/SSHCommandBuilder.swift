@@ -185,6 +185,14 @@ enum SSHCommandBuilder {
             .joined(separator: " ")
         var moshArguments: [String] = []
         if
+            let clientPath = profile.tailscaleMoshClientPath,
+            let controlPort = profile.tailscaleMoshControlPort
+        {
+            moshArguments.append("--client=\(clientPath)")
+            environment["SHELLHARBOR_TAILSCALE_CONTROL_PORT"] = String(controlPort)
+            environment["SHELLHARBOR_TAILSCALE_TARGET"] = profile.resolvedHost
+        }
+        if
             jumpProfile != nil ||
             profile.isProxyEnabled
         {
@@ -198,7 +206,15 @@ enum SSHCommandBuilder {
         }
         moshArguments.append("--ssh=\(sshBootstrap)")
         let serverCommand = profile.resolvedMoshServerCommand
-        if !serverCommand.isEmpty {
+        if let relayRange = profile.tailscaleMoshPortRange {
+            moshArguments += ["--port=\(relayRange)"]
+            let executable = serverCommand.isEmpty
+                ? "mosh-server"
+                : serverCommand
+            moshArguments.append(
+                "--server=printf '\\nMOSH IP 127.0.0.1\\n'; exec \(executable)"
+            )
+        } else if !serverCommand.isEmpty {
             moshArguments.append("--server=\(serverCommand)")
         }
         moshArguments += [

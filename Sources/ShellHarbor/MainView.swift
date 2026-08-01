@@ -36,9 +36,12 @@ struct MainView: View {
             if let profile = state.editingSession {
                 SessionEditorView(
                     profile: profile,
-                    availableJumpRemotes: state.sessions
+                    availableJumpRemotes: state.sessions,
+                    availableProxies: state.savedProxies
                 ) {
                     state.saveEditedSession($0)
+                } onSaveProxy: { name, draft in
+                    state.saveProxy(named: name, from: draft)
                 } onCancel: {
                     state.showingSessionEditor = false
                     state.editingSession = nil
@@ -578,6 +581,10 @@ private struct SessionDetail: View {
         .onChange(of: workspace.mode) { _, mode in
             state.rememberWorkspaceMode(mode, for: workspace)
         }
+        .task(id: shouldLoadRemoteFiles) {
+            guard shouldLoadRemoteFiles else { return }
+            await state.loadRemoteFilesIfNeeded(in: workspace)
+        }
         .alert(
             "确认 SSH 主机密钥",
             isPresented: Binding(
@@ -612,6 +619,11 @@ private struct SessionDetail: View {
         .onChange(of: workspace.remoteSortAscending) {
             state.rememberFileSort(for: workspace)
         }
+    }
+
+    private var shouldLoadRemoteFiles: Bool {
+        (workspace.mode == .files || workspace.mode == .workspace) &&
+            workspace.terminal.state == .connected
     }
 }
 
@@ -958,6 +970,45 @@ private struct SessionSidebar: View {
                 Button("复制 Remote") {
                     state.selectedSessionID = session.id
                     state.duplicateSelectedSession()
+                }
+                Menu("默认连接方式") {
+                    Button {
+                        state.setDefaultConnectionMethod(.ssh, for: session.id)
+                    } label: {
+                        Label(
+                            "SSH",
+                            systemImage: session.resolvedTerminalConnectionMethod == .ssh
+                                ? "checkmark"
+                                : "terminal"
+                        )
+                    }
+                    Button {
+                        state.setDefaultConnectionMethod(.mosh, for: session.id)
+                    } label: {
+                        Label(
+                            "Mosh",
+                            systemImage: session.resolvedTerminalConnectionMethod == .mosh
+                                ? "checkmark"
+                                : "antenna.radiowaves.left.and.right"
+                        )
+                    }
+                    if session.jumpRemoteID != nil {
+                        Button {
+                            state.setDefaultConnectionMethod(
+                                .jumpMosh,
+                                for: session.id
+                            )
+                        } label: {
+                            Label(
+                                "跳板 Mosh → SSH 目标",
+                                systemImage:
+                                    session.resolvedTerminalConnectionMethod ==
+                                    .jumpMosh
+                                    ? "checkmark"
+                                    : "point.3.connected.trianglepath.dotted"
+                            )
+                        }
+                    }
                 }
                 Menu("移动到分组") {
                     groupAssignmentButtons(for: [session.id])

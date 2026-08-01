@@ -4,11 +4,11 @@ import ShellHarborCLIKit
 private let usage = """
 用法：
   shcli ls [--json]
-  shcli c <Remote 名称、序号或 UUID>
+  shcli c <Remote 名称、序号或 UUID> [--mosh|--ssh]
   shcli help
 
 说明：
-  c 创建当前终端内的交互式 SSH shell。
+  c 默认使用 Remote 保存的 SSH/Mosh 方式；--mosh 或 --ssh 可临时覆盖。
   密码读取自 ShellHarbor 本地 RSA 加密配置，并通过匿名管道传递。
 """
 
@@ -20,6 +20,12 @@ private struct ListedRemote: Encodable {
     let endpoint: String
     let authentication: String
     let jumpRemoteID: UUID?
+}
+
+private enum ConnectionOverride {
+    case configured
+    case ssh
+    case mosh
 }
 
 @main
@@ -54,11 +60,17 @@ private enum ShellHarborCLI {
                 printTable(profiles)
             }
         case "c", "connect":
-            guard arguments.count == 2 else {
+            let values = Array(arguments.dropFirst())
+            let flags = values.filter { $0 == "--mosh" || $0 == "--ssh" }
+            let selectors = values.filter { $0 != "--mosh" && $0 != "--ssh" }
+            guard selectors.count == 1, flags.count <= 1 else {
                 print(usage)
                 exit(2)
             }
-            try connect(selector: arguments[1])
+            let override: ConnectionOverride = flags.first == "--mosh"
+                ? .mosh
+                : (flags.first == "--ssh" ? .ssh : .configured)
+            try connect(selector: selectors[0], override: override)
         default:
             throw SHCLIError.remoteNotFound(command)
         }
@@ -97,7 +109,10 @@ private enum ShellHarborCLI {
         print(String(decoding: data, as: UTF8.self))
     }
 
-    private static func connect(selector: String) throws {
+    private static func connect(
+        selector: String,
+        override: ConnectionOverride
+    ) throws {
         let profiles = try SHRemoteStore.load()
         var target = try SHRemoteStore.resolve(selector, in: profiles)
         target = try SHRemoteStore.decrypted(target)
@@ -122,12 +137,33 @@ private enum ShellHarborCLI {
         let jumpTailscale = try jump.flatMap {
             try SHTailscaleProxyProcess.startIfNeeded(profile: $0)
         }
-        let invocation = try SHSSHCommandBuilder.build(
-            profile: target,
-            jumpProfile: jump,
-            targetPasswordDescriptor: targetPipe?.readDescriptor,
-            jumpPasswordDescriptor: jumpPipe?.readDescriptor
+        if let targetTailscale {
+            target.proxyPort = targetTailscale.port
+        }
+        if let jumpTailscale {
+            jump?.proxyPort = jumpTailscale.port
+        }
+        let useMosh = override == .mosh || (
+            override == .configured && target.prefersMosh
         )
+        let relayProcess = jumpTailscale ?? targetTailscale
+        let tailscaleClientPath = try useMosh
+            ? relayProcess?.configureMoshClient(target: target.resolvedHost)
+            : nil
+        let invocation = try useMosh
+            ? SHSSHCommandBuilder.buildMosh(
+                profile: target,
+                jumpProfile: jump,
+                targetPasswordDescriptor: targetPipe?.readDescriptor,
+                jumpPasswordDescriptor: jumpPipe?.readDescriptor,
+                tailscaleClientPath: tailscaleClientPath
+            )
+            : SHSSHCommandBuilder.build(
+                profile: target,
+                jumpProfile: jump,
+                targetPasswordDescriptor: targetPipe?.readDescriptor,
+                jumpPasswordDescriptor: jumpPipe?.readDescriptor
+            )
 
         try withExtendedLifetime((
             targetPipe,

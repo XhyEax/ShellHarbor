@@ -20,8 +20,12 @@ cp "$RELEASE_BIN_PATH/ShellHarbor" "$CONTENTS_PATH/MacOS/ShellHarbor"
 cp "$RELEASE_BIN_PATH/shcli" "$CONTENTS_PATH/MacOS/shcli"
 cp "$PROJECT_ROOT/.build/tailscale-proxy-helper" \
   "$CONTENTS_PATH/MacOS/tailscale-proxy-helper"
+ln -sf tailscale-proxy-helper \
+  "$CONTENTS_PATH/MacOS/tailscale-mosh-client"
 cp "$PROJECT_ROOT/.build/tailscale-proxy-helper" \
   "$PROJECT_ROOT/dist/tailscale-proxy-helper"
+ln -sf tailscale-proxy-helper \
+  "$PROJECT_ROOT/dist/tailscale-mosh-client"
 cp "$RELEASE_BIN_PATH/shcli" "$PROJECT_ROOT/dist/shcli"
 cp "$PROJECT_ROOT/Resources/Info.plist" "$CONTENTS_PATH/Info.plist"
 cp -R \

@@ -36,21 +36,36 @@ struct SessionEditorView: View {
     @State private var draft: SessionProfile
     @State private var selectedSection: SessionEditorSection = .basic
     @State private var showingNewGroup = false
+    @State private var proxyName = ""
     let availableJumpRemotes: [SessionProfile]
+    let availableProxies: [NetworkProxyProfile]
     let onSave: (SessionProfile) -> Void
+    let onSaveProxy: (String, SessionProfile) -> NetworkProxyProfile?
     let onCancel: () -> Void
 
     init(
         profile: SessionProfile,
         availableJumpRemotes: [SessionProfile] = [],
+        availableProxies: [NetworkProxyProfile] = [],
         onSave: @escaping (SessionProfile) -> Void,
+        onSaveProxy: @escaping (
+            String,
+            SessionProfile
+        ) -> NetworkProxyProfile? = { _, _ in nil },
         onCancel: @escaping () -> Void
     ) {
         _draft = State(initialValue: profile)
+        _proxyName = State(
+            initialValue: availableProxies.first(where: {
+                $0.id == profile.savedProxyID
+            })?.name ?? Self.defaultProxyName(for: profile)
+        )
         self.availableJumpRemotes = availableJumpRemotes.filter {
             $0.id != profile.id && !$0.isLocalConnection
         }
+        self.availableProxies = availableProxies
         self.onSave = onSave
+        self.onSaveProxy = onSaveProxy
         self.onCancel = onCancel
     }
 
@@ -101,7 +116,18 @@ struct SessionEditorView: View {
                 Button("取消", action: onCancel)
                     .keyboardShortcut(.cancelAction)
                 Button("保存") {
-                    onSave(draft)
+                    var finalDraft = draft
+                    if finalDraft.isProxyEnabled {
+                        let name = proxyName.trimmingCharacters(
+                            in: .whitespacesAndNewlines
+                        ).isEmpty
+                            ? Self.defaultProxyName(for: finalDraft)
+                            : proxyName
+                        if let saved = onSaveProxy(name, finalDraft) {
+                            finalDraft = saved.applying(to: finalDraft)
+                        }
+                    }
+                    onSave(finalDraft)
                 }
                 .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.defaultAction)
@@ -434,11 +460,38 @@ struct SessionEditorView: View {
                 }
 
                 Section("网络 Proxy") {
+                    if !availableProxies.isEmpty {
+                        Picker(
+                            "复用已保存 Proxy",
+                            selection: Binding(
+                                get: { draft.savedProxyID },
+                                set: { proxyID in
+                                    guard
+                                        let proxyID,
+                                        let proxy = availableProxies.first(
+                                            where: { $0.id == proxyID }
+                                        )
+                                    else {
+                                        draft.savedProxyID = nil
+                                        return
+                                    }
+                                    draft = proxy.applying(to: draft)
+                                    proxyName = proxy.name
+                                }
+                            )
+                        ) {
+                            Text("自定义").tag(UUID?.none)
+                            ForEach(availableProxies) { proxy in
+                                Text(proxy.name).tag(Optional(proxy.id))
+                            }
+                        }
+                    }
                     Picker(
                         "类型",
                         selection: Binding(
                             get: { draft.resolvedProxyType },
                             set: { type in
+                                draft.savedProxyID = nil
                                 draft.proxyType =
                                     type == .none ? nil : type
                                 if
@@ -459,7 +512,7 @@ struct SessionEditorView: View {
 
                     if draft.isProxyEnabled {
                         if draft.resolvedProxyType == .tailscale {
-                            SecureField(
+                            TextField(
                                 "认证密钥",
                                 text: Binding(
                                     get: { draft.tailscaleAuthKey ?? "" },
@@ -470,7 +523,20 @@ struct SessionEditorView: View {
                                 "Login Server",
                                 text: Binding(
                                     get: { draft.tailscaleLoginServer ?? "" },
-                                    set: { draft.tailscaleLoginServer = $0 }
+                                    set: { value in
+                                        let oldDefault = Self.defaultProxyName(
+                                            for: draft
+                                        )
+                                        draft.tailscaleLoginServer = value
+                                        if
+                                            proxyName.isEmpty ||
+                                            proxyName == oldDefault
+                                        {
+                                            proxyName = Self.defaultProxyName(
+                                                for: draft
+                                            )
+                                        }
+                                    }
                                 ),
                                 prompt: Text("留空使用 Tailscale 官方服务")
                             )
@@ -492,16 +558,20 @@ struct SessionEditorView: View {
                                 prompt: Text("127.0.0.1")
                             )
                         }
-                        TextField(
-                            draft.resolvedProxyType == .tailscale
-                                ? "本地 SOCKS5 端口"
-                                : "Proxy 端口",
-                            value: Binding(
-                                get: { draft.resolvedProxyPort },
-                                set: { draft.proxyPort = $0 }
-                            ),
-                            format: .number
-                        )
+                        if draft.resolvedProxyType != .tailscale {
+                            TextField(
+                                "Proxy 端口",
+                                value: Binding(
+                                    get: { draft.resolvedProxyPort },
+                                    set: { draft.proxyPort = $0 }
+                                ),
+                                format: .number
+                            )
+                        } else {
+                            Text("本地 SOCKS5 端口会从 15040 开始自动选择。")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
 
                         Label(
                             draft.jumpRemoteID == nil
@@ -521,6 +591,15 @@ struct SessionEditorView: View {
                                 ? "认证密钥使用 ShellHarbor 本地 RSA 加密保存，并通过匿名管道交给内置 Tailscale helper；不会出现在参数或日志中。"
                                 : "当前支持无需身份认证的 SOCKS5 和 HTTP CONNECT Proxy。"
                         )
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+
+                        TextField(
+                            "共享 Proxy 名称",
+                            text: $proxyName,
+                            prompt: Text(Self.defaultProxyName(for: draft))
+                        )
+                        Text("保存 Remote 后，此 Proxy 自动可供其他 Remote 复用。")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -651,6 +730,19 @@ struct SessionEditorView: View {
         return draft.isConnectable
             ? "配置有效；主机留空时使用 127.0.0.1"
             : "请填写用户名和有效端口。主机留空时使用 127.0.0.1。"
+    }
+
+    private static func defaultProxyName(for profile: SessionProfile) -> String {
+        switch profile.resolvedProxyType {
+        case .tailscale:
+            return TailscaleLoginServer.displayName(
+                profile.tailscaleLoginServer
+            ) ?? "Tailscale 官方服务"
+        case .socks5, .httpConnect:
+            return profile.resolvedProxyHost
+        case .none:
+            return ""
+        }
     }
 
     private var jumpRemote: SessionProfile? {
