@@ -10,6 +10,26 @@ struct NetworkProxyProfile: Identifiable, Codable, Equatable {
     var tailscaleLoginServer: String?
     var tailscaleHostname: String?
 
+    init(
+        id: UUID = UUID(),
+        name: String,
+        type: SSHProxyType,
+        host: String?,
+        port: Int,
+        tailscaleAuthKey: String?,
+        tailscaleLoginServer: String?,
+        tailscaleHostname: String?
+    ) {
+        self.id = id
+        self.name = name
+        self.type = type
+        self.host = host
+        self.port = port
+        self.tailscaleAuthKey = tailscaleAuthKey
+        self.tailscaleLoginServer = tailscaleLoginServer
+        self.tailscaleHostname = tailscaleHostname
+    }
+
     init(name: String, from remote: SessionProfile) {
         self.name = name
         type = remote.resolvedProxyType

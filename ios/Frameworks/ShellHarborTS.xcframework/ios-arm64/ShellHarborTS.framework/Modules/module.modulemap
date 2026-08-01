@@ -1,0 +1,8 @@
+framework module "ShellHarborTS" {
+	header "ref.h"
+    header "SHShellharborts.objc.h"
+    header "Universe.objc.h"
+    header "ShellHarborTS.h"
+
+    export *
+}

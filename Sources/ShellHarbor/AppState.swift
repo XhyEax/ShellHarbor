@@ -11,7 +11,7 @@ final class AppState: ObservableObject {
     /// Persisted Remote definitions. The historical property name is kept to
     /// avoid a migration of the on-disk JSON format.
     @Published var sessions: [SessionProfile]
-    @Published private(set) var savedProxies: [NetworkProxyProfile]
+    @Published var savedProxies: [NetworkProxyProfile]
     @Published var selectedSessionID: UUID?
     @Published var editingSession: SessionProfile?
     @Published var showingSessionEditor = false
