@@ -337,7 +337,7 @@ struct SessionEditorView: View {
                     )
                     if draft.hostKeyPolicy == .ask {
                         Label(
-                            "优先使用当前 macOS 用户的 ~/.ssh/config；未指定 StrictHostKeyChecking 时自动接受首次出现的主机密钥。配置为 no 时不修改 known_hosts。",
+                            "优先使用当前 macOS 用户的 ~/.ssh/config；未指定 StrictHostKeyChecking 时在终端弹出主机指纹确认。配置为 no 时不修改 known_hosts。",
                             systemImage: "doc.text"
                         )
                         .font(.caption)
@@ -352,12 +352,12 @@ struct SessionEditorView: View {
                     }
                 }
 
-                Section("SSH 跳板") {
+                Section("JumpHost 代理") {
                     Picker(
-                        "通过 Remote 连接",
+                        "选择已有 Remote",
                         selection: $draft.jumpRemoteID
                     ) {
-                        Text("无（直接连接）")
+                        Text("不使用 JumpHost")
                             .tag(UUID?.none)
                         ForEach(availableJumpRemotes) { remote in
                             Text(
@@ -368,6 +368,25 @@ struct SessionEditorView: View {
                     }
 
                     if let jumpRemote {
+                        Picker(
+                            "代理实现",
+                            selection: Binding(
+                                get: { draft.resolvedSSHJumpMode },
+                                set: { draft.sshJumpMode = $0 }
+                            )
+                        ) {
+                            ForEach(SSHJumpMode.allCases) { mode in
+                                Text(mode.title).tag(mode)
+                            }
+                        }
+                        Text(
+                            jumpRemote.authentication == .password &&
+                                draft.resolvedSSHJumpMode == .sshJump
+                                ? "密码 JumpHost 需要独立保护目标与代理密码，将自动使用 Forward 实现。"
+                                : "SSH Jump 使用 OpenSSH ProxyJump；Forward 使用 ProxyCommand -W。所选 Remote 的地址、端口、认证和网络 Proxy 会作为 JumpHost 配置。"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                         if draft.isMoshConnection {
                             Label(
                                 draft.resolvedMoshJumpMode == .directTarget
@@ -408,7 +427,7 @@ struct SessionEditorView: View {
                             .foregroundStyle(.secondary)
                         }
                     } else if availableJumpRemotes.isEmpty {
-                        Text("请先创建另一个 Remote，才能将其设为 SSH 跳板。")
+                        Text("请先创建另一个 Remote，才能将其选为 JumpHost 代理。")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }

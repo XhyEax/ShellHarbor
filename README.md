@@ -7,6 +7,7 @@ ShellHarbor 是一个原生 macOS SSH 与 SCP 图形客户端。界面采用类�
 - SSH Remote 的新建、编辑、复制、删除与本地持久化
 - `shcli ls` 列出 Remote；`shcli c <名称、序号或 UUID>` 在当前终端连接交互式 SSH shell
 - 双击 Remote 创建 Session；同一个 Remote 可同时创建多个独立 Session
+- Remote 可选择另一个已有 Remote 作为 JumpHost 代理，并选择 ProxyJump 或 Forward 实现
 - Session 标签切换与关闭，每个 Session 独立保存 PTY、路径、history 和传输队列
 - 密码、私钥、SSH Agent 三种认证方式
 - GUI 密码连接通过 `sshpass` 完成；`shcli` 使用匿名文件描述符传递密码，不写入参数、环境变量、日志或临时文件
@@ -78,7 +79,7 @@ App 设置中的“链接到 Homebrew bin”默认开启，会安全创建 `/opt
 
 - 密码以 RSA-2048 OAEP + AES-GCM 密文保存在 ShellHarbor 本地配置中，私钥文件权限为当前用户可读。
 - `shcli ls` 不解密密码；连接时只解密目标及其跳板 Remote，并通过匿名管道交给 `sshpass -d`。
-- 新 Remote 默认使用 `StrictHostKeyChecking=accept-new`：首次连接自动记录主机密钥，已记录密钥发生变化时仍会拒绝连接。
+- 新 Remote 默认遵循 OpenSSH 的交互式主机密钥确认；选择“自动接受新主机”时使用 `StrictHostKeyChecking=accept-new`，已记录密钥发生变化时仍会拒绝连接。
 - 远程删除会显示确认，并明确提示不可撤销。
 
 ## 终端实现

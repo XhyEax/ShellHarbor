@@ -129,6 +129,20 @@ enum SSHProxyType: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+enum SSHJumpMode: String, Codable, CaseIterable, Identifiable {
+    case sshJump
+    case forward
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .sshJump: "SSH Jump（默认）"
+        case .forward: "Forward（ProxyCommand）"
+        }
+    }
+}
+
 enum TerminalConnectionMethod: String, Codable, CaseIterable, Identifiable {
     case ssh
     case mosh
@@ -448,6 +462,7 @@ struct SessionProfile: Identifiable, Codable, Equatable {
     var inspectionEnabled: Bool?
     var inspectionIntervalMinutes: Int?
     var jumpRemoteID: UUID?
+    var sshJumpMode: SSHJumpMode?
     var proxyType: SSHProxyType?
     var proxyHost: String?
     var proxyPort: Int?
@@ -487,6 +502,10 @@ struct SessionProfile: Identifiable, Codable, Equatable {
 
     var resolvedProxyType: SSHProxyType {
         proxyType ?? .none
+    }
+
+    var resolvedSSHJumpMode: SSHJumpMode {
+        sshJumpMode ?? .sshJump
     }
 
     var resolvedTerminalConnectionMethod: TerminalConnectionMethod {

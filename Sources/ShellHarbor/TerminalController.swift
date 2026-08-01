@@ -190,7 +190,8 @@ final class TerminalController: ObservableObject {
 
     func connect(
         profile: SessionProfile,
-        jumpProfile: SessionProfile? = nil
+        jumpProfile: SessionProfile? = nil,
+        startupCommand: String? = nil
     ) {
         let preservedState = restorationState()
         disconnect(appendMessage: false)
@@ -221,12 +222,14 @@ final class TerminalController: ObservableObject {
                 newInvocation = try SSHCommandBuilder.mosh(
                     profile: profile,
                     jumpProfile: jumpProfile,
-                    startingDirectory: directoryTracker.currentDirectory
+                    startingDirectory: directoryTracker.currentDirectory,
+                    startupCommand: startupCommand
                 )
             } else {
                 processDescription = "SSH"
                 let shellCommand = SSHCommandBuilder.interactiveShellCommand(
-                    startingDirectory: directoryTracker.currentDirectory
+                    startingDirectory: directoryTracker.currentDirectory,
+                    startupCommand: startupCommand
                 )
                 newInvocation = try SSHCommandBuilder.ssh(
                     profile: profile,

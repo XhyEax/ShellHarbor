@@ -16,6 +16,7 @@ struct RestorableSessionSnapshot: Codable, Equatable {
     let terminalDirectory: String?
     let terminalBuffer: Data?
     let pendingCommand: String?
+    var multiplexer: TerminalMultiplexer? = nil
 }
 
 enum SessionRestorationStore {

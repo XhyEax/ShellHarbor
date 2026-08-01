@@ -492,6 +492,38 @@ final class SSHCommandBuilderTests: XCTestCase {
         XCTAssertTrue(invocation.arguments.contains("BatchMode=yes"))
     }
 
+    func testAuthenticationFailuresDoNotMeanInspectionOffline() {
+        XCTAssertFalse(InspectionService.isConnectivityFailure(
+            "Permission denied, please try again."
+        ))
+        XCTAssertFalse(InspectionService.isConnectivityFailure(
+            "Received disconnect: Too many authentication failures"
+        ))
+        XCTAssertTrue(InspectionService.isConnectivityFailure(
+            "Connection timed out"
+        ))
+    }
+
+    func testJumpDefaultsToOpenSSHProxyJump() throws {
+        var target = SessionProfile()
+        target.host = "target.internal"
+        target.username = "deploy"
+        var jump = SessionProfile()
+        jump.host = "gateway.example.com"
+        jump.username = "bastion"
+        jump.port = 2222
+
+        let invocation = try SSHCommandBuilder.ssh(
+            profile: target,
+            jumpProfile: jump
+        )
+
+        XCTAssertTrue(invocation.arguments.contains("-J"))
+        XCTAssertTrue(invocation.arguments.contains(
+            "bastion@gateway.example.com:2222"
+        ))
+    }
+
     func testAgentSSHInvocationUsesSystemSSH() throws {
         var profile = SessionProfile()
         profile.host = "example.com"
@@ -507,12 +539,9 @@ final class SSHCommandBuilderTests: XCTestCase {
 
         XCTAssertEqual(invocation.executableURL.path, "/usr/bin/ssh")
         XCTAssertTrue(invocation.arguments.contains("2202"))
-        XCTAssertEqual(
-            invocation.arguments.contains(
-                "StrictHostKeyChecking=accept-new"
-            ),
-            !SSHConfigResolver.hasExplicitHostKeyPolicy(for: profile)
-        )
+        XCTAssertFalse(invocation.arguments.contains(
+            "StrictHostKeyChecking=accept-new"
+        ))
         XCTAssertFalse(
             invocation.arguments.contains("StrictHostKeyChecking=yes")
         )
@@ -525,6 +554,7 @@ final class SSHCommandBuilderTests: XCTestCase {
         target.host = "private.internal"
         target.username = "deploy"
         target.port = 2200
+        target.sshJumpMode = .forward
 
         var jump = SessionProfile()
         jump.name = "Gateway"
@@ -726,6 +756,7 @@ final class SSHCommandBuilderTests: XCTestCase {
         target.username = "deploy"
         target.terminalConnectionMethod = .mosh
         target.moshCommand = "mosh"
+        target.sshJumpMode = .forward
 
         var jump = SessionProfile()
         jump.host = "gateway.example.com"
@@ -1001,16 +1032,13 @@ final class SSHCommandBuilderTests: XCTestCase {
         )
     }
 
-    func testMissingHostKeyConfigFallsBackToAcceptNew() {
+    func testMissingHostKeyConfigKeepsInteractivePrompt() {
         let arguments = SSHHostKeyPolicyArguments.resolve(
             appPolicy: .ask,
             effectiveSSHConfigPolicy: "ask"
         )
 
-        XCTAssertTrue(
-            arguments.contains("StrictHostKeyChecking=accept-new")
-        )
-        XCTAssertTrue(arguments.contains("LogLevel=ERROR"))
+        XCTAssertTrue(arguments.isEmpty)
     }
 
     func testExplicitHostKeyConfigStillTakesPriority() {

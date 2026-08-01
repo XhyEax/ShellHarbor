@@ -60,6 +60,7 @@ public struct SHRemoteProfile: Decodable, Identifiable {
     public let keepAliveSeconds: Int?
     public let remoteGroup: String?
     public let jumpRemoteID: UUID?
+    public let sshJumpMode: String?
     public let proxyType: String?
     public let proxyHost: String?
     public let proxyPort: Int?
@@ -315,7 +316,9 @@ public enum SHSSHCommandBuilder {
             jumpProfile: jumpProfile,
             jumpPasswordDescriptor: jumpPasswordDescriptor
         )
+        arguments.append("-tt")
         arguments.append("\(profile.resolvedUsername)@\(profile.resolvedHost)")
+        arguments.append(Self.interactiveLoginCommand)
 
         guard profile.usesPassword else {
             return SHSSHInvocation(
@@ -337,6 +340,12 @@ public enum SHSSHCommandBuilder {
             ] + arguments
         )
     }
+
+    /// Bash login shells do not normally source ~/.bashrc. shcli explicitly
+    /// loads it for bash while retaining the account's configured shell.
+    static let interactiveLoginCommand = """
+    shell=${SHELL:-/bin/sh}; case ${shell##*/} in bash) [ -r "$HOME/.bashrc" ] && . "$HOME/.bashrc"; exec "$shell" -i ;; *) exec "$shell" -l ;; esac
+    """
 
     private static func commonArguments(
         for profile: SHRemoteProfile
@@ -381,10 +390,13 @@ public enum SHSSHCommandBuilder {
         if profile.hostKeyPolicy == "strict" {
             return ["-o", "StrictHostKeyChecking=yes"]
         }
-        return [
-            "-o", "StrictHostKeyChecking=accept-new",
-            "-o", "LogLevel=ERROR"
-        ]
+        if profile.hostKeyPolicy == "acceptNew" {
+            return [
+                "-o", "StrictHostKeyChecking=accept-new",
+                "-o", "LogLevel=ERROR"
+            ]
+        }
+        return []
     }
 
     private static func routeArguments(
@@ -397,6 +409,17 @@ public enum SHSSHCommandBuilder {
         }
         guard jumpProfile.isConnectable else {
             throw SHCLIError.invalidRemote(jumpProfile.name)
+        }
+        if
+            (profile.sshJumpMode ?? "sshJump") == "sshJump",
+            !jumpProfile.usesPassword,
+            (jumpProfile.proxyType ?? "none") == "none"
+        {
+            var destination = "\(jumpProfile.resolvedUsername)@\(jumpProfile.resolvedHost)"
+            if jumpProfile.resolvedPort != 22 {
+                destination += ":\(jumpProfile.resolvedPort)"
+            }
+            return ["-J", destination]
         }
         var jumpArguments = commonArguments(for: jumpProfile)
         jumpArguments += try proxyArguments(for: jumpProfile)

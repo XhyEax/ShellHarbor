@@ -1,6 +1,21 @@
 import Combine
 import Foundation
 
+enum TerminalMultiplexer: String, Codable, CaseIterable {
+    case tmux
+    case zellij
+
+    func startupCommand(sessionName: String) -> String {
+        let quoted = SSHCommandBuilder.shellQuote(sessionName)
+        switch self {
+        case .tmux:
+            return "tmux new-session -A -s \(quoted)"
+        case .zellij:
+            return "zellij attach --create \(quoted)"
+        }
+    }
+}
+
 enum WorkspaceMode: String, Codable, CaseIterable, Identifiable {
     case terminal
     case files
@@ -35,6 +50,7 @@ final class SessionWorkspace: ObservableObject, Identifiable {
     @Published private(set) var profile: SessionProfile
     @Published private(set) var jumpProfile: SessionProfile?
     let sessionNumber: Int
+    let multiplexer: TerminalMultiplexer?
     let terminal = TerminalController()
 
     var displayName: String {
@@ -74,6 +90,7 @@ final class SessionWorkspace: ObservableObject, Identifiable {
         profile: SessionProfile,
         jumpProfile: SessionProfile? = nil,
         sessionNumber: Int = 1,
+        multiplexer: TerminalMultiplexer? = nil,
         id: UUID = UUID()
     ) {
         self.id = id
@@ -81,6 +98,7 @@ final class SessionWorkspace: ObservableObject, Identifiable {
         self.profile = profile
         self.jumpProfile = jumpProfile
         self.sessionNumber = sessionNumber
+        self.multiplexer = multiplexer
         let defaultLocalPath = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Downloads", isDirectory: true)
         if let savedLocalPath = profile.lastLocalPath {

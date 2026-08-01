@@ -349,6 +349,16 @@ private struct ActiveSessionBar: View {
                         }
                     }
                 }
+                if let selected = state.selectedWorkspace {
+                    Button {
+                        state.newSession(for: selected.remoteID)
+                    } label: {
+                        Image(systemName: "plus")
+                            .frame(width: 24, height: 24)
+                    }
+                    .buttonStyle(.plain)
+                    .help("新建当前 Remote 的 Session")
+                }
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
@@ -842,6 +852,9 @@ private struct SessionSidebar: View {
             latestInspection: state.latestInspectionRecord(
                 for: session.id
             ),
+            hasInteractiveConnection: state.hasInteractiveConnection(
+                for: session.id
+            ),
             isInspecting: state.inspectingRemoteIDs.contains(session.id),
             dragProvider: {
                 draggedRemoteID = session.id
@@ -1086,6 +1099,7 @@ private struct SessionRow: View {
     let isEditing: Bool
     let isBatchSelected: Bool
     let latestInspection: InspectionRecord?
+    let hasInteractiveConnection: Bool
     let isInspecting: Bool
     let dragProvider: () -> NSItemProvider
 
@@ -1120,7 +1134,7 @@ private struct SessionRow: View {
                 Image(systemName: "link")
                     .font(.caption)
                     .foregroundStyle(Color.accentColor)
-                    .help("通过 SSH 跳板连接")
+                    .help("通过已有 Remote 作为 JumpHost 代理连接")
             } else if session.isProxyEnabled {
                 Image(systemName: "network")
                     .font(.caption)
@@ -1131,6 +1145,10 @@ private struct SessionRow: View {
                 ProgressView()
                     .controlSize(.mini)
                     .help("正在巡检")
+            } else if hasInteractiveConnection {
+                Label("在线", systemImage: "checkmark.circle.fill")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.green)
             } else if let latestInspection {
                 let status = latestInspection.healthStatus
                 Label(status.title, systemImage: status.icon)
@@ -1191,7 +1209,7 @@ private struct SessionRow: View {
     }
 
     private var isOffline: Bool {
-        latestInspection?.healthStatus == .offline
+        !hasInteractiveConnection && latestInspection?.healthStatus == .offline
     }
 }
 
@@ -1228,7 +1246,9 @@ private struct ConnectionBar: View {
                         } ?? profile.proxySummary.map {
                             " · \($0)"
                         } ?? "") +
-                        " · \(workspace.terminal.state.label)"
+                        (workspace.terminal.state == .connected
+                            ? ""
+                            : " · \(workspace.terminal.state.label)")
                     )
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -1276,6 +1296,27 @@ private struct ConnectionBar: View {
             }
             .buttonStyle(.bordered)
             .disabled(!workspace.profile.isConnectable)
+
+            Menu {
+                Button("新建 tmux Session") {
+                    state.launchMultiplexer(
+                        .tmux,
+                        for: workspace.remoteID
+                    )
+                }
+                Button("新建 zellij Session") {
+                    state.launchMultiplexer(
+                        .zellij,
+                        for: workspace.remoteID
+                    )
+                }
+            } label: {
+                Label("快速启动", systemImage: "bolt.fill")
+            }
+            .disabled(
+                workspace.profile.isLocalConnection ||
+                    !workspace.profile.isConnectable
+            )
 
             Button {
                 state.reconnect()

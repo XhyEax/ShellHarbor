@@ -31,7 +31,11 @@ enum SSHHostKeyPolicyArguments {
         }
 
         switch appPolicy {
-        case .ask, .acceptNew:
+        case .ask:
+            // Leave OpenSSH in its interactive default mode. The PTY-backed
+            // terminal can then show and answer the fingerprint prompt.
+            return []
+        case .acceptNew:
             return [
                 "-o", "StrictHostKeyChecking=accept-new",
                 "-o", "LogLevel=ERROR"
@@ -152,7 +156,8 @@ enum SSHCommandBuilder {
     static func mosh(
         profile: SessionProfile,
         jumpProfile: SessionProfile? = nil,
-        startingDirectory: String? = nil
+        startingDirectory: String? = nil,
+        startupCommand: String? = nil
     ) throws -> SSHInvocation {
         if
             profile.resolvedMoshJumpMode == .moshOnJump,
@@ -161,7 +166,8 @@ enum SSHCommandBuilder {
             return try jumpMosh(
                 profile: profile,
                 jumpProfile: jumpProfile,
-                startingDirectory: startingDirectory
+                startingDirectory: startingDirectory,
+                startupCommand: startupCommand
             )
         }
 
@@ -201,14 +207,10 @@ enum SSHCommandBuilder {
         ]
         let restoredDirectory = startingDirectory?
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        if
-            let restoredDirectory,
-            !restoredDirectory.isEmpty,
-            restoredDirectory != "~",
-            let shellCommand = interactiveShellCommand(
-                startingDirectory: restoredDirectory
-            )
-        {
+        if let shellCommand = interactiveShellCommand(
+            startingDirectory: restoredDirectory,
+            startupCommand: startupCommand
+        ) {
             moshArguments += ["/bin/sh", "-lc", shellCommand]
         }
 
@@ -228,7 +230,8 @@ enum SSHCommandBuilder {
     private static func jumpMosh(
         profile: SessionProfile,
         jumpProfile: SessionProfile,
-        startingDirectory: String?
+        startingDirectory: String?,
+        startupCommand: String?
     ) throws -> SSHInvocation {
         let targetSSH = jumpSideTargetSSHArguments(
             profile: profile
@@ -252,14 +255,10 @@ enum SSHCommandBuilder {
 
         let restoredDirectory = startingDirectory?
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        if
-            let restoredDirectory,
-            !restoredDirectory.isEmpty,
-            restoredDirectory != "~",
-            let shellCommand = interactiveShellCommand(
-                startingDirectory: restoredDirectory
-            )
-        {
+        if let shellCommand = interactiveShellCommand(
+            startingDirectory: restoredDirectory,
+            startupCommand: startupCommand
+        ) {
             moshArguments += ["/bin/sh", "-lc", shellCommand]
         }
 
@@ -386,30 +385,39 @@ enum SSHCommandBuilder {
     }
 
     static func interactiveShellCommand(
-        startingDirectory: String?
+        startingDirectory: String?,
+        startupCommand: String? = nil
     ) -> String? {
-        guard
-            let startingDirectory,
-            !startingDirectory.trimmingCharacters(
-                in: .whitespacesAndNewlines
-            ).isEmpty
-        else {
-            return nil
-        }
+        let requestedDirectory = startingDirectory?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let requestedStartup = startupCommand?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard requestedDirectory?.isEmpty == false ||
+            requestedStartup?.isEmpty == false else { return nil }
         let directory: String
-        if startingDirectory == "~" {
+        if requestedDirectory == nil || requestedDirectory?.isEmpty == true ||
+            requestedDirectory == "~" {
             directory = "\"$HOME\""
-        } else if startingDirectory.hasPrefix("~/") {
+        } else if let requestedDirectory,
+            requestedDirectory.hasPrefix("~/") {
             directory = "\"$HOME\"/" + shellQuote(
-                String(startingDirectory.dropFirst(2))
+                String(requestedDirectory.dropFirst(2))
             )
+        } else if let requestedDirectory {
+            directory = shellQuote(requestedDirectory)
         } else {
-            directory = shellQuote(startingDirectory)
+            directory = "\"$HOME\""
+        }
+        let launch: String
+        if let requestedStartup, !requestedStartup.isEmpty {
+            launch = "exec /bin/sh -lc \(shellQuote(requestedStartup))"
+        } else {
+            launch = "exec \"${SHELL:-$0}\" -l"
         }
         return """
         stty opost onlcr 2>/dev/null || true
         cd -- \(directory) 2>/dev/null || cd -- "$HOME"
-        exec "${SHELL:-$0}" -l
+        \(launch)
         """
     }
 
@@ -455,6 +463,18 @@ enum SSHCommandBuilder {
             jumpProfile.isConnectable
         else {
             throw SSHServiceError.invalidJumpProfile
+        }
+
+        if
+            profile.resolvedSSHJumpMode == .sshJump,
+            jumpProfile.authentication != .password,
+            !jumpProfile.isProxyEnabled
+        {
+            var destination = "\(jumpProfile.username)@\(jumpProfile.resolvedHost)"
+            if jumpProfile.port != 22 {
+                destination += ":\(jumpProfile.port)"
+            }
+            return ["-J", destination]
         }
 
         var arguments = commonArguments(for: jumpProfile)

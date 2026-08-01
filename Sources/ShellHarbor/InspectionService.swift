@@ -156,7 +156,7 @@ enum InspectionService {
             id: UUID(),
             remoteID: profile.id,
             timestamp: timestamp,
-            isReachable: false,
+            isReachable: !isConnectivityFailure(message),
             cpuUsagePercent: nil,
             memoryUsagePercent: nil,
             memoryTotalBytes: nil,
@@ -166,5 +166,16 @@ enum InspectionService {
             diskUsagePercent: nil,
             errorMessage: message
         )
+    }
+
+    static func isConnectivityFailure(_ message: String) -> Bool {
+        let value = message.lowercased()
+        // Authentication failures prove that the SSH server was reached.
+        if value.contains("permission denied") ||
+            value.contains("too many authentication failures") ||
+            value.contains("authentication failed") {
+            return false
+        }
+        return true
     }
 }

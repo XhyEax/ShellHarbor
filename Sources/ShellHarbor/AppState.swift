@@ -95,6 +95,12 @@ final class AppState: ObservableObject {
         activeWorkspaces.lazy.filter { $0.remoteID == remoteID }.count
     }
 
+    func hasInteractiveConnection(for remoteID: UUID) -> Bool {
+        activeWorkspaces.contains {
+            $0.remoteID == remoteID && $0.terminal.state == .connected
+        }
+    }
+
     /// Convenience for app menu commands.
     var terminal: TerminalController {
         selectedWorkspace?.terminal ?? fallbackTerminal
@@ -484,6 +490,7 @@ final class AppState: ObservableObject {
     private func openWorkspace(
         profile: SessionProfile,
         restoration: RestorableSessionSnapshot? = nil,
+        multiplexer: TerminalMultiplexer? = nil,
         shouldSelect: Bool = true
     ) {
         let remoteID = profile.id
@@ -497,6 +504,7 @@ final class AppState: ObservableObject {
             profile: profile,
             jumpProfile: jumpProfile(for: profile),
             sessionNumber: nextNumber,
+            multiplexer: restoration?.multiplexer ?? multiplexer,
             id: restoration?.workspaceID ?? UUID()
         )
         workspace.terminal.setScrollbackLines(terminalScrollbackLines)
@@ -607,6 +615,27 @@ final class AppState: ObservableObject {
         }
     }
 
+    func newSession(for remoteID: UUID) {
+        if remoteID == localRemoteID {
+            openWorkspace(profile: localProfile)
+        } else if let profile = sessions.first(where: { $0.id == remoteID }) {
+            selectSession(remoteID)
+            openWorkspace(profile: profile)
+        }
+    }
+
+    func launchMultiplexer(
+        _ multiplexer: TerminalMultiplexer,
+        for remoteID: UUID
+    ) {
+        guard
+            remoteID != localRemoteID,
+            let profile = sessions.first(where: { $0.id == remoteID })
+        else { return }
+        selectSession(remoteID)
+        openWorkspace(profile: profile, multiplexer: multiplexer)
+    }
+
     func reconnect() {
         guard let workspace = selectedWorkspace else {
             notice = "请先选择一个已打开的 Session。"
@@ -630,7 +659,10 @@ final class AppState: ObservableObject {
         }
         workspace.terminal.connect(
             profile: workspace.profile,
-            jumpProfile: workspace.jumpProfile
+            jumpProfile: workspace.jumpProfile,
+            startupCommand: workspace.multiplexer?.startupCommand(
+                sessionName: workspace.sessionLabel
+            )
         )
         workspace.terminal.startProcessIfNeeded()
         guard !workspace.profile.isLocalConnection else { return }
@@ -669,7 +701,8 @@ final class AppState: ObservableObject {
                 remotePath: workspace.remotePath,
                 terminalDirectory: terminalState.directory,
                 terminalBuffer: terminalState.buffer,
-                pendingCommand: terminalState.pendingCommand
+                pendingCommand: terminalState.pendingCommand,
+                multiplexer: workspace.multiplexer
             )
         }
         SessionRestorationStore.save(

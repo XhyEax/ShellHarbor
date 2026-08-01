@@ -89,6 +89,19 @@ final class ShellHarborCLIKitTests: XCTestCase {
         XCTAssertFalse(command.contains("jump-secret"))
     }
 
+    func testShcliLoadsBashrcForInteractiveBashSessions() throws {
+        let remote = try profile(name: "Bash", host: "example.com")
+        let invocation = try SHSSHCommandBuilder.build(
+            profile: remote,
+            jumpProfile: nil,
+            targetPasswordDescriptor: nil,
+            jumpPasswordDescriptor: nil
+        )
+
+        XCTAssertTrue(invocation.arguments.last?.contains("$HOME/.bashrc") == true)
+        XCTAssertTrue(invocation.arguments.last?.contains("exec \"$shell\" -i") == true)
+    }
+
     func testPasswordPipeContainsPasswordOnlyInAnonymousDescriptor() throws {
         let pipe = try SHPasswordPipe(password: "pipe-secret")
         let data = FileHandle(
