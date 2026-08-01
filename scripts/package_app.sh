@@ -9,6 +9,7 @@ ICONSET_PATH="$BUILD_ROOT/AppIcon.iconset"
 BASE_ICON="$BUILD_ROOT/AppIcon-1024.png"
 
 cd "$PROJECT_ROOT"
+"$PROJECT_ROOT/scripts/build_tailscale_helper.sh"
 swift build -c release
 RELEASE_BIN_PATH="$(swift build -c release --show-bin-path)"
 
@@ -17,6 +18,10 @@ rm -f "$PROJECT_ROOT/dist/sh-cli"
 mkdir -p "$CONTENTS_PATH/MacOS" "$CONTENTS_PATH/Resources" "$ICONSET_PATH"
 cp "$RELEASE_BIN_PATH/ShellHarbor" "$CONTENTS_PATH/MacOS/ShellHarbor"
 cp "$RELEASE_BIN_PATH/shcli" "$CONTENTS_PATH/MacOS/shcli"
+cp "$PROJECT_ROOT/.build/tailscale-proxy-helper" \
+  "$CONTENTS_PATH/MacOS/tailscale-proxy-helper"
+cp "$PROJECT_ROOT/.build/tailscale-proxy-helper" \
+  "$PROJECT_ROOT/dist/tailscale-proxy-helper"
 cp "$RELEASE_BIN_PATH/shcli" "$PROJECT_ROOT/dist/shcli"
 cp "$PROJECT_ROOT/Resources/Info.plist" "$CONTENTS_PATH/Info.plist"
 cp -R \
@@ -38,4 +43,5 @@ iconutil -c icns "$ICONSET_PATH" -o "$CONTENTS_PATH/Resources/AppIcon.icns"
 
 codesign --force --deep --sign - "$APP_PATH"
 codesign --force --sign - "$PROJECT_ROOT/dist/shcli"
+codesign --force --sign - "$PROJECT_ROOT/dist/tailscale-proxy-helper"
 echo "$APP_PATH"

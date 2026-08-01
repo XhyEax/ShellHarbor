@@ -102,6 +102,32 @@ final class ShellHarborCLIKitTests: XCTestCase {
         XCTAssertTrue(invocation.arguments.last?.contains("exec \"$shell\" -i") == true)
     }
 
+    func testCLITailscaleProxyBuildsLoopbackSOCKSWithoutSecret() throws {
+        let object: [String: Any] = [
+            "id": "11111111-1111-1111-1111-111111111111",
+            "name": "Tailnet",
+            "host": "server.tailnet.ts.net",
+            "username": "deploy",
+            "proxyType": "tailscale",
+            "proxyPort": 5140,
+            "tailscaleAuthKey": "test-auth-key"
+        ]
+        let remote = try JSONDecoder().decode(
+            SHRemoteProfile.self,
+            from: JSONSerialization.data(withJSONObject: object)
+        )
+        let invocation = try SHSSHCommandBuilder.build(
+            profile: remote,
+            jumpProfile: nil,
+            targetPasswordDescriptor: nil,
+            jumpPasswordDescriptor: nil
+        )
+        let command = invocation.arguments.joined(separator: " ")
+
+        XCTAssertTrue(command.contains("127.0.0.1:5140"))
+        XCTAssertFalse(command.contains("test-auth-key"))
+    }
+
     func testPasswordPipeContainsPasswordOnlyInAnonymousDescriptor() throws {
         let pipe = try SHPasswordPipe(password: "pipe-secret")
         let data = FileHandle(

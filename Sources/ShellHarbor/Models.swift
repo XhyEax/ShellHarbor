@@ -101,6 +101,7 @@ enum SSHProxyType: String, Codable, CaseIterable, Identifiable {
     case none
     case socks5
     case httpConnect
+    case tailscale
 
     var id: String { rawValue }
 
@@ -109,13 +110,14 @@ enum SSHProxyType: String, Codable, CaseIterable, Identifiable {
         case .none: "无（直接连接）"
         case .socks5: "SOCKS5"
         case .httpConnect: "HTTP CONNECT"
+        case .tailscale: "Tailscale"
         }
     }
 
     var ncProtocol: String? {
         switch self {
         case .none: nil
-        case .socks5: "5"
+        case .socks5, .tailscale: "5"
         case .httpConnect: "connect"
         }
     }
@@ -125,6 +127,7 @@ enum SSHProxyType: String, Codable, CaseIterable, Identifiable {
         case .none: 0
         case .socks5: 1080
         case .httpConnect: 8080
+        case .tailscale: 5040
         }
     }
 }
@@ -466,6 +469,9 @@ struct SessionProfile: Identifiable, Codable, Equatable {
     var proxyType: SSHProxyType?
     var proxyHost: String?
     var proxyPort: Int?
+    var tailscaleAuthKey: String?
+    var tailscaleLoginServer: String?
+    var tailscaleHostname: String?
     var terminalConnectionMethod: TerminalConnectionMethod?
     var moshCommand: String?
     var moshServerCommand: String?
@@ -575,6 +581,9 @@ struct SessionProfile: Identifiable, Codable, Equatable {
     }
 
     var resolvedProxyHost: String {
+        if resolvedProxyType == .tailscale {
+            return "127.0.0.1"
+        }
         let value = proxyHost?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return value.isEmpty && isProxyEnabled
@@ -594,8 +603,21 @@ struct SessionProfile: Identifiable, Codable, Equatable {
         !isProxyEnabled ||
         (
             !resolvedProxyHost.isEmpty &&
-            (1...65535).contains(resolvedProxyPort)
+            (1...65535).contains(resolvedProxyPort) &&
+            (
+                resolvedProxyType != .tailscale ||
+                !(tailscaleAuthKey ?? "").trimmingCharacters(
+                    in: .whitespacesAndNewlines
+                ).isEmpty
+            )
         )
+    }
+
+    var resolvedTailscaleHostname: String {
+        let value = (tailscaleHostname ?? "").trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        return value.isEmpty ? "shellharbor-\(id.uuidString.lowercased().prefix(8))" : value
     }
 
     var proxySummary: String? {

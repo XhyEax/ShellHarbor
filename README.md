@@ -8,6 +8,7 @@ ShellHarbor 是一个原生 macOS SSH 与 SCP 图形客户端。界面采用类�
 - `shcli ls` 列出 Remote；`shcli c <名称、序号或 UUID>` 在当前终端连接交互式 SSH shell
 - 双击 Remote 创建 Session；同一个 Remote 可同时创建多个独立 Session
 - Remote 可选择另一个已有 Remote 作为 JumpHost 代理，并选择 ProxyJump 或 Forward 实现
+- 网络 Proxy 支持基于官方 tsnet 的内置 Tailscale 节点，可配置 AuthKey 与自定义 Login Server
 - Session 标签切换与关闭，每个 Session 独立保存 PTY、路径、history 和传输队列
 - 密码、私钥、SSH Agent 三种认证方式
 - GUI 密码连接通过 `sshpass` 完成；`shcli` 使用匿名文件描述符传递密码，不写入参数、环境变量、日志或临时文件

@@ -34,6 +34,43 @@ struct TerminalPasswordPromptResponder {
     }
 }
 
+struct SSHHostKeyConfirmation: Identifiable, Equatable {
+    let id = UUID()
+    let prompt: String
+}
+
+struct SSHHostKeyPromptDetector {
+    private var outputTail = ""
+    private(set) var didDetect = false
+
+    mutating func confirmation(for bytes: [UInt8]) -> SSHHostKeyConfirmation? {
+        guard !didDetect else { return nil }
+        outputTail = String(
+            (outputTail + String(decoding: bytes, as: UTF8.self))
+                .suffix(8_192)
+        )
+        guard
+            outputTail.localizedCaseInsensitiveContains(
+                "The authenticity of host"
+            ),
+            outputTail.localizedCaseInsensitiveContains(
+                "Are you sure you want to continue connecting"
+            )
+        else {
+            return nil
+        }
+        didDetect = true
+        let start = outputTail.range(
+            of: "The authenticity of host",
+            options: .caseInsensitive
+        )?.lowerBound ?? outputTail.startIndex
+        return SSHHostKeyConfirmation(
+            prompt: String(outputTail[start...])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+    }
+}
+
 @MainActor
 final class TerminalController: ObservableObject {
     @Published private(set) var state: ConnectionState = .disconnected
@@ -44,6 +81,7 @@ final class TerminalController: ObservableObject {
     @Published private(set) var interruptToken = UUID()
     @Published private(set) var clearToken = UUID()
     @Published private(set) var inputRequest: TerminalInputRequest?
+    @Published private(set) var hostKeyConfirmation: SSHHostKeyConfirmation?
 
     private(set) var invocation: SSHInvocation?
     private(set) var retainedTerminalView: LocalProcessTerminalView?
@@ -56,6 +94,7 @@ final class TerminalController: ObservableObject {
     private var processDescription = "SSH"
     private var automaticPasswordResponder:
         TerminalPasswordPromptResponder?
+    private var hostKeyPromptDetector = SSHHostKeyPromptDetector()
 
     var onRestorationChanged: (() -> Void)?
     private(set) var scrollbackLines =
@@ -134,6 +173,10 @@ final class TerminalController: ObservableObject {
     }
 
     func terminalOutputDidChange(_ bytes: [UInt8] = []) {
+        if hostKeyConfirmation == nil,
+            let confirmation = hostKeyPromptDetector.confirmation(for: bytes) {
+            hostKeyConfirmation = confirmation
+        }
         if var responder = automaticPasswordResponder {
             let response = responder.response(for: bytes)
             automaticPasswordResponder = responder
@@ -146,6 +189,16 @@ final class TerminalController: ObservableObject {
             }
         }
         onRestorationChanged?()
+    }
+
+    func respondToHostKeyConfirmation(accept: Bool) {
+        guard hostKeyConfirmation != nil else { return }
+        hostKeyConfirmation = nil
+        let response = accept ? "yes\n" : "no\n"
+        guard let retainedTerminalView, retainedTerminalView.process.running else {
+            return
+        }
+        retainedTerminalView.process.send(data: Array(response.utf8)[...])
     }
 
     func restorationState() -> (
@@ -265,6 +318,14 @@ final class TerminalController: ObservableObject {
         }
     }
 
+    func beginPreparingConnection() {
+        state = .connecting
+    }
+
+    func failPreparingConnection(_ message: String) {
+        state = .failed(message)
+    }
+
     func processStarted(for token: UUID) {
         guard token == connectionToken, invocation != nil else { return }
         state = .connected
@@ -340,6 +401,8 @@ final class TerminalController: ObservableObject {
 
     func disconnect(appendMessage: Bool = true) {
         automaticPasswordResponder = nil
+        hostKeyConfirmation = nil
+        hostKeyPromptDetector = SSHHostKeyPromptDetector()
         if invocation != nil {
             disconnectToken = UUID()
         }

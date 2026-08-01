@@ -458,16 +458,44 @@ struct SessionEditorView: View {
                     }
 
                     if draft.isProxyEnabled {
+                        if draft.resolvedProxyType == .tailscale {
+                            SecureField(
+                                "认证密钥",
+                                text: Binding(
+                                    get: { draft.tailscaleAuthKey ?? "" },
+                                    set: { draft.tailscaleAuthKey = $0 }
+                                )
+                            )
+                            TextField(
+                                "Login Server",
+                                text: Binding(
+                                    get: { draft.tailscaleLoginServer ?? "" },
+                                    set: { draft.tailscaleLoginServer = $0 }
+                                ),
+                                prompt: Text("留空使用 Tailscale 官方服务")
+                            )
+                            TextField(
+                                "节点名称",
+                                text: Binding(
+                                    get: { draft.tailscaleHostname ?? "" },
+                                    set: { draft.tailscaleHostname = $0 }
+                                ),
+                                prompt: Text(draft.resolvedTailscaleHostname)
+                            )
+                        } else {
+                            TextField(
+                                "Proxy 主机",
+                                text: Binding(
+                                    get: { draft.proxyHost ?? "" },
+                                    set: { draft.proxyHost = $0 }
+                                ),
+                                prompt: Text("127.0.0.1")
+                            )
+                        }
                         TextField(
-                            "Proxy 主机",
-                            text: Binding(
-                                get: { draft.proxyHost ?? "" },
-                                set: { draft.proxyHost = $0 }
-                            ),
-                            prompt: Text("127.0.0.1")
-                        )
-                        TextField(
-                            "Proxy 端口",
+                            draft.resolvedProxyType == .tailscale
+                                ? "本地 SOCKS5 端口"
+                                : "Proxy 端口",
                             value: Binding(
                                 get: { draft.resolvedProxyPort },
                                 set: { draft.proxyPort = $0 }
@@ -488,7 +516,11 @@ struct SessionEditorView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
-                        Text("当前支持无需身份认证的 SOCKS5 和 HTTP CONNECT Proxy。")
+                        Text(
+                            draft.resolvedProxyType == .tailscale
+                                ? "认证密钥使用 ShellHarbor 本地 RSA 加密保存，并通过匿名管道交给内置 Tailscale helper；不会出现在参数或日志中。"
+                                : "当前支持无需身份认证的 SOCKS5 和 HTTP CONNECT Proxy。"
+                        )
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }

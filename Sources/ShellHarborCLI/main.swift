@@ -116,6 +116,12 @@ private enum ShellHarborCLI {
         let jumpPipe = try jump?.usesPassword == true
             ? SHPasswordPipe(password: jump?.password ?? "")
             : nil
+        let targetTailscale = try jump == nil
+            ? SHTailscaleProxyProcess.startIfNeeded(profile: target)
+            : nil
+        let jumpTailscale = try jump.flatMap {
+            try SHTailscaleProxyProcess.startIfNeeded(profile: $0)
+        }
         let invocation = try SHSSHCommandBuilder.build(
             profile: target,
             jumpProfile: jump,
@@ -123,7 +129,12 @@ private enum ShellHarborCLI {
             jumpPasswordDescriptor: jumpPipe?.readDescriptor
         )
 
-        try withExtendedLifetime((targetPipe, jumpPipe)) {
+        try withExtendedLifetime((
+            targetPipe,
+            jumpPipe,
+            targetTailscale,
+            jumpTailscale
+        )) {
             try SHProcessExecutor.replaceCurrentProcess(with: invocation)
         }
     }

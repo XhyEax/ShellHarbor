@@ -73,6 +73,7 @@ final class AppState: ObservableObject {
     private var inspectionTasks: [UUID: Task<Void, Never>] = [:]
     private var transferControls: [UUID: CommandProcessControl] = [:]
     private var restorationSaveTask: Task<Void, Never>?
+    private let tailscaleProxyManager = TailscaleProxyManager()
     private let fallbackTerminal = TerminalController()
     private let localRemoteID = UUID(
         uuidString: "4C4F4341-4C53-5348-0000-000000000022"
@@ -353,6 +354,16 @@ final class AppState: ObservableObject {
             return
         }
         inspectingRemoteIDs.insert(remoteID)
+        do {
+            if let jump = jumpProfile(for: profile) {
+                try await tailscaleProxyManager.ensureRunning(for: jump)
+            } else {
+                try await tailscaleProxyManager.ensureRunning(for: profile)
+            }
+        } catch {
+            inspectingRemoteIDs.remove(remoteID)
+            return
+        }
         let record = await InspectionService.inspect(
             profile: profile,
             jumpProfile: jumpProfile(for: profile)
@@ -654,19 +665,38 @@ final class AppState: ObservableObject {
     }
 
     private func startConnection(in workspace: SessionWorkspace) {
-        if !workspace.profile.isLocalConnection {
-            inspectNow(workspace.remoteID)
-        }
-        workspace.terminal.connect(
-            profile: workspace.profile,
-            jumpProfile: workspace.jumpProfile,
-            startupCommand: workspace.multiplexer?.startupCommand(
-                sessionName: workspace.sessionLabel
+        workspace.terminal.beginPreparingConnection()
+        Task { [weak self, weak workspace] in
+            guard let self, let workspace else { return }
+            do {
+                if let jumpProfile = workspace.jumpProfile {
+                    try await tailscaleProxyManager.ensureRunning(
+                        for: jumpProfile
+                    )
+                } else {
+                    try await tailscaleProxyManager.ensureRunning(
+                        for: workspace.profile
+                    )
+                }
+            } catch {
+                workspace.terminal.failPreparingConnection(
+                    error.localizedDescription
+                )
+                return
+            }
+            guard self.workspaces[workspace.id] === workspace else { return }
+            if !workspace.profile.isLocalConnection {
+                inspectNow(workspace.remoteID)
+            }
+            workspace.terminal.connect(
+                profile: workspace.profile,
+                jumpProfile: workspace.jumpProfile,
+                startupCommand: workspace.multiplexer?.startupCommand(
+                    sessionName: workspace.sessionLabel
+                )
             )
-        )
-        workspace.terminal.startProcessIfNeeded()
-        guard !workspace.profile.isLocalConnection else { return }
-        Task {
+            workspace.terminal.startProcessIfNeeded()
+            guard !workspace.profile.isLocalConnection else { return }
             let defaultRemotePath =
                 workspace.profile.resolvedRemoteFilePath
             let hasRememberedPath =

@@ -652,6 +652,26 @@ final class SSHCommandBuilderTests: XCTestCase {
         XCTAssertTrue(proxyOption.contains("'%h' '%p'"))
     }
 
+    func testTailscaleProxyUsesManagedLoopbackSOCKS5() throws {
+        var profile = SessionProfile()
+        profile.host = "server.tailnet.ts.net"
+        profile.username = "alice"
+        profile.proxyType = .tailscale
+        profile.proxyPort = 5_140
+        profile.tailscaleAuthKey = "test-auth-key"
+        profile.tailscaleLoginServer = "https://headscale.example.com"
+
+        let invocation = try SSHCommandBuilder.ssh(profile: profile)
+        let proxy = try XCTUnwrap(invocation.arguments.first(where: {
+            $0.hasPrefix("ProxyCommand=")
+        }))
+
+        XCTAssertTrue(proxy.contains("127.0.0.1:5140"))
+        XCTAssertTrue(proxy.contains("'-X' '5'"))
+        XCTAssertFalse(proxy.contains("test-auth-key"))
+        XCTAssertTrue(profile.resolvedTailscaleHostname.hasPrefix("shellharbor-"))
+    }
+
     func testHTTPConnectProxyIsAppliedToSCP() throws {
         var profile = SessionProfile()
         profile.host = "private.internal"
@@ -909,6 +929,24 @@ final class SSHCommandBuilderTests: XCTestCase {
             ),
             Array("target-secret\n".utf8)
         )
+    }
+
+    func testGUIHostKeyPromptDetectorCapturesFullConfirmation() {
+        var detector = SSHHostKeyPromptDetector()
+        XCTAssertNil(detector.confirmation(for: Array(
+            "The authenticity of host 'example.com' can't be established.\n"
+                .utf8
+        )))
+        let confirmation = detector.confirmation(for: Array("""
+        ED25519 key fingerprint is: SHA256:test.
+        Are you sure you want to continue connecting (yes/no/[fingerprint])?
+        """.utf8))
+
+        XCTAssertTrue(confirmation?.prompt.contains(
+            "The authenticity of host 'example.com'"
+        ) == true)
+        XCTAssertTrue(confirmation?.prompt.contains("SHA256:test") == true)
+        XCTAssertNil(detector.confirmation(for: Array("repeat".utf8)))
     }
 
     func testJumpMoshCommandDefaultsToRemotePATH() {
@@ -1989,6 +2027,27 @@ final class SSHCommandBuilderTests: XCTestCase {
             placeAfter: false
         )
         XCTAssertEqual(workspaceIDs, [d, b, c, a])
+    }
+
+    func testShiftRemoteSelectionUsesVisibleRangeInEitherDirection() {
+        let ids = (0..<5).map { _ in UUID() }
+
+        XCTAssertEqual(
+            RemoteMultiSelection.range(
+                from: ids[1],
+                through: ids[3],
+                in: ids
+            ),
+            Set(ids[1...3])
+        )
+        XCTAssertEqual(
+            RemoteMultiSelection.range(
+                from: ids[4],
+                through: ids[2],
+                in: ids
+            ),
+            Set(ids[2...4])
+        )
     }
 
     func testSessionTabCloseGroupsFollowCurrentOrder() {

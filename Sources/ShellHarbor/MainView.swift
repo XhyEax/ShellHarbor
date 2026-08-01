@@ -578,6 +578,28 @@ private struct SessionDetail: View {
         .onChange(of: workspace.mode) { _, mode in
             state.rememberWorkspaceMode(mode, for: workspace)
         }
+        .alert(
+            "确认 SSH 主机密钥",
+            isPresented: Binding(
+                get: { workspace.terminal.hostKeyConfirmation != nil },
+                set: { presented in
+                    if !presented {
+                        workspace.terminal.respondToHostKeyConfirmation(
+                            accept: false
+                        )
+                    }
+                }
+            )
+        ) {
+            Button("信任并继续") {
+                workspace.terminal.respondToHostKeyConfirmation(accept: true)
+            }
+            Button("取消连接", role: .cancel) {
+                workspace.terminal.respondToHostKeyConfirmation(accept: false)
+            }
+        } message: {
+            Text(workspace.terminal.hostKeyConfirmation?.prompt ?? "")
+        }
         .onChange(of: workspace.localSortColumn) {
             state.rememberFileSort(for: workspace)
         }
@@ -598,12 +620,33 @@ private struct RemoteGroupRenameRequest: Identifiable {
     let name: String
 }
 
+enum RemoteMultiSelection {
+    static func range(
+        from anchorID: UUID,
+        through targetID: UUID,
+        in orderedIDs: [UUID]
+    ) -> Set<UUID> {
+        guard
+            let anchorIndex = orderedIDs.firstIndex(of: anchorID),
+            let targetIndex = orderedIDs.firstIndex(of: targetID)
+        else {
+            return [targetID]
+        }
+        let bounds = min(anchorIndex, targetIndex)...max(
+            anchorIndex,
+            targetIndex
+        )
+        return Set(orderedIDs[bounds])
+    }
+}
+
 private struct SessionSidebar: View {
     @EnvironmentObject private var state: AppState
     @State private var lastRemoteClickID: UUID?
     @State private var lastRemoteClickTime: TimeInterval = 0
     @State private var isEditingRemotes = false
     @State private var selectedRemoteIDs = Set<UUID>()
+    @State private var remoteSelectionAnchorID: UUID?
     @State private var showingDeleteConfirmation = false
     @State private var showingNewGroup = false
     @State private var newGroupTargetIDs = Set<UUID>()
@@ -825,6 +868,10 @@ private struct SessionSidebar: View {
             .filter { $0 != RemoteGroupName.ungrouped }
     }
 
+    private var visibleRemoteIDs: [UUID] {
+        remoteGroups.flatMap { $0.sessions.map(\.id) }
+    }
+
     private func toggleRemoteEditing() {
         isEditingRemotes.toggle()
         if isEditingRemotes {
@@ -833,11 +880,14 @@ private struct SessionSidebar: View {
                 state.sessions.contains(where: { $0.id == currentID })
             {
                 selectedRemoteIDs = [currentID]
+                remoteSelectionAnchorID = currentID
             } else {
                 selectedRemoteIDs.removeAll()
+                remoteSelectionAnchorID = nil
             }
         } else {
             selectedRemoteIDs.removeAll()
+            remoteSelectionAnchorID = nil
         }
     }
 
@@ -968,12 +1018,41 @@ private struct SessionSidebar: View {
     }
 
     private func handleRemoteClick(_ remoteID: UUID) {
+        let modifiers = NSEvent.modifierFlags
+            .intersection(.deviceIndependentFlagsMask)
+        if modifiers.contains(.shift) {
+            let anchor = remoteSelectionAnchorID ?? (
+                state.selectedSessionID.flatMap { selectedID in
+                    visibleRemoteIDs.contains(selectedID)
+                        ? selectedID
+                        : nil
+                } ?? remoteID
+            )
+            if !isEditingRemotes {
+                isEditingRemotes = true
+                selectedRemoteIDs = [anchor]
+            }
+            let range = RemoteMultiSelection.range(
+                from: anchor,
+                through: remoteID,
+                in: visibleRemoteIDs
+            )
+            if modifiers.contains(.command) {
+                selectedRemoteIDs.formUnion(range)
+            } else {
+                selectedRemoteIDs = range
+            }
+            remoteSelectionAnchorID = anchor
+            return
+        }
+
         if isEditingRemotes {
             if selectedRemoteIDs.contains(remoteID) {
                 selectedRemoteIDs.remove(remoteID)
             } else {
                 selectedRemoteIDs.insert(remoteID)
             }
+            remoteSelectionAnchorID = remoteID
             return
         }
 
@@ -983,6 +1062,7 @@ private struct SessionSidebar: View {
             now - lastRemoteClickTime <= NSEvent.doubleClickInterval
 
         state.selectSession(remoteID)
+        remoteSelectionAnchorID = remoteID
         if isDoubleClick {
             lastRemoteClickID = nil
             lastRemoteClickTime = 0
@@ -1149,6 +1229,14 @@ private struct SessionRow: View {
                 Label("在线", systemImage: "checkmark.circle.fill")
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(.green)
+                    .labelStyle(.titleAndIcon)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Color.green.opacity(0.13), in: Capsule())
+                    .overlay {
+                        Capsule()
+                            .stroke(Color.green.opacity(0.35), lineWidth: 1)
+                    }
             } else if let latestInspection {
                 let status = latestInspection.healthStatus
                 Label(status.title, systemImage: status.icon)
@@ -1161,6 +1249,10 @@ private struct SessionRow: View {
                         status.color.opacity(0.13),
                         in: Capsule()
                     )
+                    .overlay {
+                        Capsule()
+                            .stroke(status.color.opacity(0.35), lineWidth: 1)
+                    }
                     .help(
                         "最近巡检：\(latestInspection.timestamp.formatted(date: .abbreviated, time: .shortened))"
                     )

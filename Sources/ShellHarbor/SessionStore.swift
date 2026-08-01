@@ -244,13 +244,23 @@ enum SessionStore {
         var needsMigration = false
         let decrypted = sessions.map {
             var profile = $0
-            guard !profile.password.isEmpty else { return profile }
-            if PasswordCipher.isEncrypted(profile.password) {
-                profile.password = (
-                    try? PasswordCipher.decrypt(profile.password)
-                ) ?? ""
-            } else {
-                needsMigration = true
+            if !profile.password.isEmpty {
+                if PasswordCipher.isEncrypted(profile.password) {
+                    profile.password = (
+                        try? PasswordCipher.decrypt(profile.password)
+                    ) ?? ""
+                } else {
+                    needsMigration = true
+                }
+            }
+            if let key = profile.tailscaleAuthKey, !key.isEmpty {
+                if PasswordCipher.isEncrypted(key) {
+                    profile.tailscaleAuthKey = (
+                        try? PasswordCipher.decrypt(key)
+                    ) ?? ""
+                } else {
+                    needsMigration = true
+                }
             }
             return profile
         }
@@ -272,6 +282,13 @@ enum SessionStore {
                     profile.password = try PasswordCipher.encrypt(
                         profile.password
                     )
+                }
+                if
+                    let key = profile.tailscaleAuthKey,
+                    !key.isEmpty,
+                    !PasswordCipher.isEncrypted(key)
+                {
+                    profile.tailscaleAuthKey = try PasswordCipher.encrypt(key)
                 }
                 return profile
             }

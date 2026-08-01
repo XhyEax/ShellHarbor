@@ -14,6 +14,8 @@ public enum SHCLIError: LocalizedError {
     case privateKeyUnavailable
     case sshpassUnavailable
     case invalidProxy(String)
+    case tailscaleHelperUnavailable
+    case tailscaleStartupFailed(String)
     case pipeFailure(Int32)
     case processFailure(String, Int32)
 
@@ -39,11 +41,117 @@ public enum SHCLIError: LocalizedError {
             "未找到 sshpass。请先安装 sshpass。"
         case let .invalidProxy(name):
             "Remote \(name) 的 Proxy 配置无效。"
+        case .tailscaleHelperUnavailable:
+            "找不到 ShellHarbor 内置 Tailscale helper。"
+        case let .tailscaleStartupFailed(message):
+            "Tailscale Proxy 启动失败：\(message)"
         case let .pipeFailure(code):
             "无法创建安全密码管道（errno \(code)）。"
         case let .processFailure(path, code):
             "无法启动 \(path)（errno \(code)）。"
         }
+    }
+}
+
+public final class SHTailscaleProxyProcess {
+    private struct Ready: Decodable {
+        let type: String
+        let host: String
+        let port: Int
+    }
+
+    private let process: Process
+
+    private init(process: Process) {
+        self.process = process
+    }
+
+    deinit {
+        if process.isRunning {
+            process.terminate()
+        }
+    }
+
+    public static func startIfNeeded(
+        profile: SHRemoteProfile
+    ) throws -> SHTailscaleProxyProcess? {
+        guard profile.usesTailscaleProxy else { return nil }
+        guard
+            let key = profile.tailscaleAuthKey?.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            ),
+            !key.isEmpty
+        else {
+            throw SHCLIError.invalidProxy(profile.name)
+        }
+        let executable = try helperURL()
+        let stateDirectory = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        )[0]
+        .appendingPathComponent("ShellHarbor/Tailscale", isDirectory: true)
+        .appendingPathComponent(profile.id.uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: stateDirectory,
+            withIntermediateDirectories: true
+        )
+        let port = profile.proxyPort ?? 5_040
+        guard (1...65_535).contains(port) else {
+            throw SHCLIError.invalidProxy(profile.name)
+        }
+
+        let process = Process()
+        let input = Pipe()
+        let output = Pipe()
+        let errors = Pipe()
+        process.executableURL = executable
+        process.arguments = [
+            "--hostname", profile.resolvedTailscaleHostname,
+            "--state-dir", stateDirectory.path,
+            "--listen", "127.0.0.1:\(port)",
+            "--parent-pid", String(ProcessInfo.processInfo.processIdentifier),
+            "--login-server", profile.tailscaleLoginServer ?? ""
+        ]
+        process.standardInput = input
+        process.standardOutput = output
+        process.standardError = errors
+        try process.run()
+        input.fileHandleForWriting.write(Data("\(key)\n".utf8))
+        try? input.fileHandleForWriting.close()
+        let data = output.fileHandleForReading.availableData
+        guard
+            let ready = try? JSONDecoder().decode(Ready.self, from: data),
+            ready.type == "ready",
+            ready.host == "127.0.0.1",
+            ready.port == port
+        else {
+            let detail = String(
+                decoding: errors.fileHandleForReading.availableData,
+                as: UTF8.self
+            ).trimmingCharacters(in: .whitespacesAndNewlines)
+            if process.isRunning { process.terminate() }
+            throw SHCLIError.tailscaleStartupFailed(
+                detail.isEmpty ? "helper 未返回就绪状态" : detail
+            )
+        }
+        return SHTailscaleProxyProcess(process: process)
+    }
+
+    private static func helperURL() throws -> URL {
+        let fileManager = FileManager.default
+        if let executable = Bundle.main.executableURL {
+            let sibling = executable.deletingLastPathComponent()
+                .appendingPathComponent("tailscale-proxy-helper")
+            if fileManager.isExecutableFile(atPath: sibling.path) {
+                return sibling
+            }
+        }
+        let development = URL(fileURLWithPath: fileManager.currentDirectoryPath)
+            .appendingPathComponent(".build/tailscale-proxy-helper")
+        guard fileManager.isExecutableFile(atPath: development.path) else {
+            throw SHCLIError.tailscaleHelperUnavailable
+        }
+        return development
     }
 }
 
@@ -55,6 +163,7 @@ public struct SHRemoteProfile: Decodable, Identifiable {
     public let username: String?
     public let authentication: String?
     public var password: String?
+    public var tailscaleAuthKey: String?
     public let privateKeyPath: String?
     public let hostKeyPolicy: String?
     public let keepAliveSeconds: Int?
@@ -64,6 +173,8 @@ public struct SHRemoteProfile: Decodable, Identifiable {
     public let proxyType: String?
     public let proxyHost: String?
     public let proxyPort: Int?
+    public let tailscaleLoginServer: String?
+    public let tailscaleHostname: String?
 
     public var resolvedHost: String {
         let value = (host ?? "").trimmingCharacters(
@@ -102,6 +213,19 @@ public struct SHRemoteProfile: Decodable, Identifiable {
 
     public var usesPassword: Bool {
         resolvedAuthentication == "password"
+    }
+
+    public var usesTailscaleProxy: Bool {
+        proxyType == "tailscale"
+    }
+
+    public var resolvedTailscaleHostname: String {
+        let value = (tailscaleHostname ?? "").trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        return value.isEmpty
+            ? "shellharbor-\(id.uuidString.lowercased().prefix(8))"
+            : value
     }
 }
 
@@ -162,14 +286,25 @@ public enum SHRemoteStore {
     public static func decrypted(
         _ profile: SHRemoteProfile
     ) throws -> SHRemoteProfile {
-        guard profile.usesPassword else { return profile }
-        guard let storedPassword = profile.password, !storedPassword.isEmpty else {
-            throw SHCLIError.passwordUnavailable(profile.name)
-        }
         var result = profile
-        if SHPasswordCipher.isEncrypted(storedPassword) {
+        if profile.usesPassword {
+            guard let storedPassword = profile.password,
+                !storedPassword.isEmpty else {
+                throw SHCLIError.passwordUnavailable(profile.name)
+            }
+            if SHPasswordCipher.isEncrypted(storedPassword) {
+                do {
+                    result.password = try SHPasswordCipher.decrypt(storedPassword)
+                } catch {
+                    throw SHCLIError.passwordUnavailable(profile.name)
+                }
+            }
+        }
+        if profile.usesTailscaleProxy,
+            let storedKey = profile.tailscaleAuthKey,
+            SHPasswordCipher.isEncrypted(storedKey) {
             do {
-                result.password = try SHPasswordCipher.decrypt(storedPassword)
+                result.tailscaleAuthKey = try SHPasswordCipher.decrypt(storedKey)
             } catch {
                 throw SHCLIError.passwordUnavailable(profile.name)
             }
@@ -451,20 +586,26 @@ public enum SHSSHCommandBuilder {
     ) throws -> [String] {
         let type = profile.proxyType ?? "none"
         guard type != "none" else { return [] }
-        let host = (profile.proxyHost ?? "").trimmingCharacters(
-            in: .whitespacesAndNewlines
-        )
-        let defaultPort = type == "socks5" ? 1_080 : 8_080
+        let host = type == "tailscale"
+            ? "127.0.0.1"
+            : (profile.proxyHost ?? "").trimmingCharacters(
+                in: .whitespacesAndNewlines
+            )
+        let defaultPort = type == "socks5"
+            ? 1_080
+            : (type == "tailscale" ? 5_040 : 8_080)
         let port = profile.proxyPort ?? defaultPort
         guard
             !host.isEmpty,
             (1...65_535).contains(port),
-            type == "socks5" || type == "httpConnect"
+            type == "socks5" || type == "httpConnect" || type == "tailscale"
         else {
             throw SHCLIError.invalidProxy(profile.name)
         }
         let endpoint = host.contains(":") ? "[\(host)]:\(port)" : "\(host):\(port)"
-        let protocolName = type == "socks5" ? "5" : "connect"
+        let protocolName = type == "socks5" || type == "tailscale"
+            ? "5"
+            : "connect"
         let command = [
             "/usr/bin/nc", "-x", endpoint,
             "-X", protocolName, "%h", "%p"
