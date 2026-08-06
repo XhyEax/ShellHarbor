@@ -526,9 +526,27 @@ public struct SHSCPTransfer: Equatable {
 
     public static func detect(
         from source: String,
-        to destination: String,
-        fileManager: FileManager = .default
+        to destination: String?,
+        fileManager: FileManager = .default,
+        currentDirectory: String? = nil
     ) -> SHSCPTransfer {
+        guard let destination else {
+            let directory = currentDirectory ?? fileManager.currentDirectoryPath
+            let remoteName = NSString(
+                string: source.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            ).lastPathComponent
+            let localName = uniqueLocalName(
+                remoteName.isEmpty ? "download" : remoteName,
+                in: directory,
+                fileManager: fileManager
+            )
+            return SHSCPTransfer(
+                localPath: (directory as NSString)
+                    .appendingPathComponent(localName),
+                remotePath: source,
+                direction: .download
+            )
+        }
         let expandedSource = NSString(string: source).expandingTildeInPath
         if fileManager.fileExists(atPath: expandedSource) {
             return SHSCPTransfer(
@@ -542,6 +560,29 @@ public struct SHSCPTransfer: Equatable {
             remotePath: source,
             direction: .download
         )
+    }
+
+    private static func uniqueLocalName(
+        _ name: String,
+        in directory: String,
+        fileManager: FileManager
+    ) -> String {
+        let original = name as NSString
+        let fileExtension = original.pathExtension
+        let stem = fileExtension.isEmpty
+            ? name
+            : original.deletingPathExtension
+        var candidate = name
+        var suffix = 1
+        while fileManager.fileExists(
+            atPath: (directory as NSString).appendingPathComponent(candidate)
+        ) {
+            candidate = fileExtension.isEmpty
+                ? "\(stem) (\(suffix))"
+                : "\(stem) (\(suffix)).\(fileExtension)"
+            suffix += 1
+        }
+        return candidate
     }
 }
 

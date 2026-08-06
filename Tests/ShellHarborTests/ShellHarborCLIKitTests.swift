@@ -208,6 +208,55 @@ final class ShellHarborCLIKitTests: XCTestCase {
         XCTAssertEqual(transfer.remotePath, "/remote/missing/file.txt")
     }
 
+    func testSCPOmittedDestinationDownloadsRemotePathToCurrentDirectory() {
+        let fileManager = FileManager.default
+        let directory = fileManager.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        try? fileManager.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        defer { try? fileManager.removeItem(at: directory) }
+        let transfer = SHSCPTransfer.detect(
+            from: "/remote/reports/report.txt",
+            to: nil,
+            fileManager: fileManager,
+            currentDirectory: directory.path
+        )
+
+        XCTAssertEqual(transfer.direction, .download)
+        XCTAssertEqual(
+            transfer.localPath,
+            directory.appendingPathComponent("report.txt").path
+        )
+        XCTAssertEqual(transfer.remotePath, "/remote/reports/report.txt")
+    }
+
+    func testSCPOmittedDestinationAddsFinderStyleCollisionSuffix() throws {
+        let fileManager = FileManager.default
+        let directory = fileManager.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        try fileManager.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        defer { try? fileManager.removeItem(at: directory) }
+        try Data().write(to: directory.appendingPathComponent("xx.txt"))
+        try Data().write(to: directory.appendingPathComponent("xx (1).txt"))
+
+        let transfer = SHSCPTransfer.detect(
+            from: "/remote/xx.txt",
+            to: nil,
+            fileManager: fileManager,
+            currentDirectory: directory.path
+        )
+
+        XCTAssertEqual(
+            transfer.localPath,
+            directory.appendingPathComponent("xx (2).txt").path
+        )
+    }
+
     func testSCPBuilderUsesRemoteProfileAndRecursiveTransfer() throws {
         let remote = try profile(name: "Files", host: "example.com")
         let invocation = try SHSSHCommandBuilder.buildSCP(

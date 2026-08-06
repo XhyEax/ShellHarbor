@@ -6,12 +6,13 @@ private let usage = """
   shcli ls [--json]
   shcli local
   shcli c <Remote 名称、序号或 UUID> [--mosh|--ssh]
-  shcli scp <Remote 名称、序号或 UUID> <from> <to>
+  shcli scp <Remote 名称、序号或 UUID> <from> [to]
   shcli help
 
 说明：
   c 默认使用 Remote 保存的 SSH/Mosh 方式；--mosh 或 --ssh 可临时覆盖。
   scp 自动检测 from：本地存在时上传，否则从 Remote 下载；支持文件和目录。
+  省略 to 时，from 固定视为 Remote 路径，并下载到当前目录。
   密码读取自 ShellHarbor 本地 RSA 加密配置，并通过匿名管道传递。
 """
 
@@ -81,14 +82,14 @@ private enum ShellHarborCLI {
                 : (flags.first == "--ssh" ? .ssh : .configured)
             try connect(selector: selectors[0], override: override)
         case "scp":
-            guard arguments.count == 4 else {
+            guard arguments.count == 3 || arguments.count == 4 else {
                 print(usage)
                 exit(2)
             }
             try copy(
                 selector: arguments[1],
                 from: arguments[2],
-                to: arguments[3]
+                to: arguments.count == 4 ? arguments[3] : nil
             )
         default:
             throw SHCLIError.remoteNotFound(command)
@@ -222,7 +223,7 @@ private enum ShellHarborCLI {
     private static func copy(
         selector: String,
         from source: String,
-        to destination: String
+        to destination: String?
     ) throws {
         let profiles = try SHRemoteStore.load()
         var target = try SHRemoteStore.decrypted(
