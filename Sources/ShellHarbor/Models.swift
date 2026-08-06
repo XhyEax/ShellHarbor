@@ -1,3 +1,4 @@
+import AppKit
 import Darwin
 import Foundation
 import SwiftUI
@@ -133,19 +134,7 @@ enum SSHProxyType: String, Codable, CaseIterable, Identifiable {
 }
 
 enum TailscaleNodeIdentity {
-    private static let defaultsKey = "tailscaleDefaultNodeName"
-
-    static var name: String {
-        if
-            let saved = UserDefaults.standard.string(forKey: defaultsKey),
-            !saved.isEmpty
-        {
-            return saved
-        }
-        let generated = "shellharbor-\(UUID().uuidString.lowercased().prefix(8))"
-        UserDefaults.standard.set(generated, forKey: defaultsKey)
-        return generated
-    }
+    static let name = "shellharbor-mac"
 }
 
 enum TailscaleLoginServer {
@@ -455,6 +444,76 @@ enum TerminalTheme: String, CaseIterable, Identifiable {
     }
 }
 
+enum TerminalFontFamily: String, CaseIterable, Identifiable {
+    case dejaVuSansMono = "DejaVu Sans Mono"
+    case ptMono = "PT Mono"
+    case sourceCodeProMedium = "Source Code Pro Medium"
+    case ubuntuMono = "Ubuntu Mono"
+    case courierNew = "Courier New"
+    case cascadiaCode = "Cascadia Code"
+    case firaCode = "Fira Code"
+    case jetBrainsMono = "JetBrains Mono"
+    case meslo = "Meslo"
+
+    var id: String { rawValue }
+
+    private static let userDefaultsKey = "terminalFontFamily"
+
+    private var fontNames: [String] {
+        switch self {
+        case .dejaVuSansMono: ["DejaVuSansMono", rawValue]
+        case .ptMono: ["PTMono-Regular", rawValue]
+        case .sourceCodeProMedium: ["SourceCodePro-Medium", rawValue]
+        case .ubuntuMono: ["UbuntuMono-Regular", rawValue]
+        case .courierNew: ["CourierNewPSMT", rawValue]
+        case .cascadiaCode: ["CascadiaCode-Regular", rawValue]
+        case .firaCode: ["FiraCode-Regular", rawValue]
+        case .jetBrainsMono: ["JetBrainsMono-Regular", rawValue]
+        case .meslo: ["MesloLGM-Regular", "MesloLGMDZ-Regular", rawValue]
+        }
+    }
+
+    func nsFont(size: CGFloat) -> NSFont {
+        for name in fontNames {
+            if let font = NSFont(name: name, size: size) { return font }
+        }
+        return .monospacedSystemFont(ofSize: size, weight: .regular)
+    }
+
+    static var saved: TerminalFontFamily {
+        guard
+            let rawValue = UserDefaults.standard.string(forKey: userDefaultsKey),
+            let family = TerminalFontFamily(rawValue: rawValue)
+        else {
+            return .dejaVuSansMono
+        }
+        return family
+    }
+
+    static func save(_ family: TerminalFontFamily) {
+        UserDefaults.standard.set(family.rawValue, forKey: userDefaultsKey)
+    }
+}
+
+enum TerminalFontSizeSettings {
+    static let defaultSize = 16.0
+    static let allowedSizes = 8.0...32.0
+    private static let userDefaultsKey = "terminalFontSize"
+
+    static var savedSize: Double {
+        let saved = UserDefaults.standard.double(forKey: userDefaultsKey)
+        return saved == 0 ? defaultSize : normalized(saved)
+    }
+
+    static func normalized(_ size: Double) -> Double {
+        min(max(size, allowedSizes.lowerBound), allowedSizes.upperBound)
+    }
+
+    static func save(_ size: Double) {
+        UserDefaults.standard.set(normalized(size), forKey: userDefaultsKey)
+    }
+}
+
 enum TerminalScrollbackSettings {
     static let defaultLines = 100_000
     static let allowedLines = 1_000...1_000_000
@@ -518,6 +577,10 @@ struct SessionProfile: Identifiable, Codable, Equatable {
     var moshCommand: String?
     var moshServerCommand: String?
     var jumpMoshCommand: String?
+    /// Preserved for configuration exchange with the embedded iOS Mosh
+    /// implementation, whose jump mode starts mosh-server on the jump host.
+    var jumpMoshServerCommand: String?
+    var moshUDPPort: String?
     var moshJumpMode: MoshJumpMode?
     /// Only populated by the built-in Local profile. Persisted Remote
     /// definitions leave this nil, preserving the existing JSON format.
@@ -620,6 +683,12 @@ struct SessionProfile: Identifiable, Codable, Equatable {
         let command = jumpMoshCommand?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return command.isEmpty ? "mosh" : command
+    }
+
+    var resolvedMoshUDPPort: String {
+        (moshUDPPort ?? "").trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
     }
 
     var resolvedProxyHost: String {

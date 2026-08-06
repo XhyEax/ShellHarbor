@@ -164,12 +164,10 @@ final class TailscaleProxyManager {
             throw TailscaleProxyError.startupFailed("Tailscale helper 未运行")
         }
         let helper = try helperURL()
-        let client = helper.deletingLastPathComponent()
-            .appendingPathComponent("tailscale-mosh-client")
-        guard FileManager.default.isExecutableFile(atPath: client.path) else {
+        guard FileManager.default.isExecutableFile(atPath: helper.path) else {
             throw TailscaleProxyError.helperUnavailable
         }
-        return (instance.controlPort, client.path)
+        return (instance.controlPort, helper.path)
     }
 
     private func instanceKey(for profile: SessionProfile) -> String {

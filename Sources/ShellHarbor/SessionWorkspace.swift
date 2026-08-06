@@ -9,9 +9,62 @@ enum TerminalMultiplexer: String, Codable, CaseIterable {
         let quoted = SSHCommandBuilder.shellQuote(sessionName)
         switch self {
         case .tmux:
-            return "tmux new-session -A -s \(quoted)"
+            // tmux owns the complete history of its alternate screen. Enable
+            // mouse only for this ShellHarbor session so wheel gestures enter
+            // tmux copy-mode without changing the user's global tmux.conf.
+            return "tmux has-session -t \(quoted) 2>/dev/null || tmux new-session -d -s \(quoted); tmux set-option -t \(quoted) mouse on && exec tmux attach-session -t \(quoted)"
         case .zellij:
             return "zellij attach --create \(quoted)"
+        }
+    }
+}
+
+struct RemoteMultiplexerSession: Identifiable, Equatable, Sendable {
+    let multiplexer: TerminalMultiplexer
+    let name: String
+
+    var id: String { "\(multiplexer.rawValue):\(name)" }
+}
+
+enum RemoteMultiplexerSessionService {
+    static let listingCommand = """
+    tmux_bin=$(command -v tmux 2>/dev/null || true)
+    for candidate in /opt/homebrew/bin/tmux /usr/local/bin/tmux /usr/bin/tmux; do [ -n "$tmux_bin" ] || [ ! -x "$candidate" ] || tmux_bin=$candidate; done
+    if [ -n "$tmux_bin" ]; then "$tmux_bin" list-sessions -F '__SHELLHARBOR_TMUX__#{session_name}' 2>/dev/null || true; fi
+    zellij_bin=$(command -v zellij 2>/dev/null || true)
+    for candidate in /opt/homebrew/bin/zellij /usr/local/bin/zellij "$HOME/.cargo/bin/zellij"; do [ -n "$zellij_bin" ] || [ ! -x "$candidate" ] || zellij_bin=$candidate; done
+    if [ -n "$zellij_bin" ]; then
+      { "$zellij_bin" list-sessions --short --no-formatting 2>/dev/null || "$zellij_bin" list-sessions --short 2>/dev/null || true; } | sed 's/^/__SHELLHARBOR_ZELLIJ__/'
+    fi
+    """
+
+    static func parse(_ output: String) -> [RemoteMultiplexerSession] {
+        var seen = Set<String>()
+        return output.split(whereSeparator: \Character.isNewline).compactMap {
+            line in
+            let value = String(line)
+            let item: RemoteMultiplexerSession?
+            if value.hasPrefix("__SHELLHARBOR_TMUX__") {
+                item = RemoteMultiplexerSession(
+                    multiplexer: .tmux,
+                    name: String(value.dropFirst("__SHELLHARBOR_TMUX__".count))
+                        .replacingOccurrences(of: "\\t", with: "")
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                )
+            } else if value.hasPrefix("__SHELLHARBOR_ZELLIJ__") {
+                item = RemoteMultiplexerSession(
+                    multiplexer: .zellij,
+                    name: String(value.dropFirst("__SHELLHARBOR_ZELLIJ__".count))
+                        .replacingOccurrences(of: "\\t", with: "")
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                )
+            } else {
+                item = nil
+            }
+            guard let item, !item.name.isEmpty, seen.insert(item.id).inserted else {
+                return nil
+            }
+            return item
         }
     }
 }
@@ -21,6 +74,7 @@ enum WorkspaceMode: String, Codable, CaseIterable, Identifiable {
     case files
     case workspace
     case inspection
+    case forwarding
 
     var id: String { rawValue }
 
@@ -30,6 +84,7 @@ enum WorkspaceMode: String, Codable, CaseIterable, Identifiable {
         case .terminal: "终端"
         case .files: "文件"
         case .inspection: "巡检日志"
+        case .forwarding: "端口转发"
         }
     }
 
@@ -39,6 +94,7 @@ enum WorkspaceMode: String, Codable, CaseIterable, Identifiable {
         case .terminal: "terminal"
         case .files: "arrow.left.arrow.right"
         case .inspection: "waveform.path.ecg"
+        case .forwarding: "point.3.connected.trianglepath.dotted"
         }
     }
 }
@@ -49,9 +105,14 @@ final class SessionWorkspace: ObservableObject, Identifiable {
     let remoteID: UUID
     @Published private(set) var profile: SessionProfile
     @Published private(set) var jumpProfile: SessionProfile?
+    private(set) var connectionProfile: SessionProfile
+    private(set) var connectionJumpProfile: SessionProfile?
     let sessionNumber: Int
     let multiplexer: TerminalMultiplexer?
+    private var hasIssuedMultiplexerStartup = false
     let terminal = TerminalController()
+    let portForwards = PortForwardController()
+    @Published var portForwardRules: [PortForwardRule] = []
 
     var displayName: String {
         "\(profile.name) · \(sessionLabel)"
@@ -98,6 +159,8 @@ final class SessionWorkspace: ObservableObject, Identifiable {
         remoteID = profile.id
         self.profile = profile
         self.jumpProfile = jumpProfile
+        connectionProfile = profile
+        connectionJumpProfile = jumpProfile
         self.sessionNumber = sessionNumber
         self.multiplexer = multiplexer
         let defaultLocalPath = FileManager.default.homeDirectoryForCurrentUser
@@ -137,6 +200,11 @@ final class SessionWorkspace: ObservableObject, Identifiable {
 
     func updateProfile(_ profile: SessionProfile) {
         guard profile.id == remoteID else { return }
+        if profile.isLocalConnection {
+            self.profile = profile
+            connectionProfile = profile
+            return
+        }
         self.profile.name = profile.name
         self.profile.accentHex = profile.accentHex
         self.profile.remoteIcon = profile.remoteIcon
@@ -152,6 +220,25 @@ final class SessionWorkspace: ObservableObject, Identifiable {
         jumpProfile?.accentHex = profile.accentHex
         jumpProfile?.remoteIcon = profile.remoteIcon
         jumpProfile?.remoteGroup = profile.remoteGroup
+    }
+
+    func updateConnectionRouting(
+        profile: SessionProfile,
+        jumpProfile: SessionProfile?
+    ) {
+        connectionProfile = profile
+        connectionJumpProfile = jumpProfile
+    }
+
+    /// Quick launch is a one-shot connection bootstrap. Reconnecting the same
+    /// workspace must not inject the tmux/zellij command into the new shell.
+    func consumeMultiplexerStartupCommand() -> String? {
+        guard
+            !hasIssuedMultiplexerStartup,
+            let multiplexer
+        else { return nil }
+        hasIssuedMultiplexerStartup = true
+        return multiplexer.startupCommand(sessionName: sessionLabel)
     }
 
     func applyRestoration(_ snapshot: RestorableSessionSnapshot) {

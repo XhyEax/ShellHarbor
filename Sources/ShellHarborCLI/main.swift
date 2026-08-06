@@ -4,11 +4,14 @@ import ShellHarborCLIKit
 private let usage = """
 用法：
   shcli ls [--json]
+  shcli local
   shcli c <Remote 名称、序号或 UUID> [--mosh|--ssh]
+  shcli scp <Remote 名称、序号或 UUID> <from> <to>
   shcli help
 
 说明：
   c 默认使用 Remote 保存的 SSH/Mosh 方式；--mosh 或 --ssh 可临时覆盖。
+  scp 自动检测 from：本地存在时上传，否则从 Remote 下载；支持文件和目录。
   密码读取自 ShellHarbor 本地 RSA 加密配置，并通过匿名管道传递。
 """
 
@@ -59,6 +62,12 @@ private enum ShellHarborCLI {
             } else {
                 printTable(profiles)
             }
+        case "local":
+            guard arguments.count == 1 else {
+                print(usage)
+                exit(2)
+            }
+            try launchLocalShell()
         case "c", "connect":
             let values = Array(arguments.dropFirst())
             let flags = values.filter { $0 == "--mosh" || $0 == "--ssh" }
@@ -71,9 +80,44 @@ private enum ShellHarborCLI {
                 ? .mosh
                 : (flags.first == "--ssh" ? .ssh : .configured)
             try connect(selector: selectors[0], override: override)
+        case "scp":
+            guard arguments.count == 4 else {
+                print(usage)
+                exit(2)
+            }
+            try copy(
+                selector: arguments[1],
+                from: arguments[2],
+                to: arguments[3]
+            )
         default:
             throw SHCLIError.remoteNotFound(command)
         }
+    }
+
+    private static func launchLocalShell() throws {
+        let shell = ProcessInfo.processInfo.environment["SHELL"]
+            .flatMap { $0.isEmpty ? nil : $0 }
+            ?? "/bin/zsh"
+        guard FileManager.default.isExecutableFile(atPath: shell) else {
+            throw SHCLIError.invalidConfiguration
+        }
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        guard FileManager.default.changeCurrentDirectoryPath(home) else {
+            throw SHCLIError.invalidConfiguration
+        }
+        setenv("PWD", home, 1)
+        let arguments = [shell, "-l"]
+        let cArguments = arguments.map { strdup($0) } + [nil]
+        defer {
+            for case let pointer? in cArguments {
+                free(UnsafeMutableRawPointer(pointer))
+            }
+        }
+        _ = cArguments.withUnsafeBufferPointer { buffer in
+            execv(shell, buffer.baseAddress!)
+        }
+        throw SHCLIError.invalidConfiguration
     }
 
     private static func printTable(_ profiles: [SHRemoteProfile]) {
@@ -165,6 +209,56 @@ private enum ShellHarborCLI {
                 jumpPasswordDescriptor: jumpPipe?.readDescriptor
             )
 
+        try withExtendedLifetime((
+            targetPipe,
+            jumpPipe,
+            targetTailscale,
+            jumpTailscale
+        )) {
+            try SHProcessExecutor.replaceCurrentProcess(with: invocation)
+        }
+    }
+
+    private static func copy(
+        selector: String,
+        from source: String,
+        to destination: String
+    ) throws {
+        let profiles = try SHRemoteStore.load()
+        var target = try SHRemoteStore.decrypted(
+            SHRemoteStore.resolve(selector, in: profiles)
+        )
+        var jump: SHRemoteProfile?
+        if let jumpID = target.jumpRemoteID {
+            guard let storedJump = profiles.first(where: { $0.id == jumpID }) else {
+                throw SHCLIError.jumpRemoteNotFound(target.name)
+            }
+            jump = try SHRemoteStore.decrypted(storedJump)
+        }
+
+        let targetPipe = try target.usesPassword
+            ? SHPasswordPipe(password: target.password ?? "")
+            : nil
+        let jumpPipe = try jump?.usesPassword == true
+            ? SHPasswordPipe(password: jump?.password ?? "")
+            : nil
+        let targetTailscale = try jump == nil
+            ? SHTailscaleProxyProcess.startIfNeeded(profile: target)
+            : nil
+        let jumpTailscale = try jump.flatMap {
+            try SHTailscaleProxyProcess.startIfNeeded(profile: $0)
+        }
+        if let targetTailscale { target.proxyPort = targetTailscale.port }
+        if let jumpTailscale { jump?.proxyPort = jumpTailscale.port }
+
+        let transfer = SHSCPTransfer.detect(from: source, to: destination)
+        let invocation = try SHSSHCommandBuilder.buildSCP(
+            profile: target,
+            jumpProfile: jump,
+            transfer: transfer,
+            targetPasswordDescriptor: targetPipe?.readDescriptor,
+            jumpPasswordDescriptor: jumpPipe?.readDescriptor
+        )
         try withExtendedLifetime((
             targetPipe,
             jumpPipe,

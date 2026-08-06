@@ -16,6 +16,7 @@ struct PortableRemote: Codable {
     var host: String
     var port: Int
     var username: String
+    var remoteStartPath: String?
     var authentication: String
     var hostKeyPolicy: String
     var keepAliveSeconds: Int
@@ -34,6 +35,10 @@ struct PortableRemote: Codable {
     var moshCommand: String?
     var moshServerCommand: String?
     var jumpMoshCommand: String?
+    var jumpMoshServerCommand: String? = nil
+    var moshUDPPort: String? = nil
+    var inspectionEnabled: Bool? = nil
+    var inspectionIntervalMinutes: Int? = nil
 }
 
 struct PortableProxy: Codable {
@@ -101,24 +106,31 @@ extension RemoteStore {
                     host: remote.host.isEmpty ? "127.0.0.1" : remote.host,
                     port: remote.port,
                     username: remote.username,
+                    remoteStartPath: remote.remoteStartPath.isEmpty ? nil : remote.remoteStartPath,
                     authentication: remote.authentication.rawValue,
-                    hostKeyPolicy: "ask",
-                    keepAliveSeconds: 30,
-                    accentHex: "#4F8CFF",
+                    hostKeyPolicy: remote.hostKeyPolicy.rawValue,
+                    keepAliveSeconds: remote.keepAliveSeconds,
+                    accentHex: remote.accentHex,
                     remoteGroup: remote.remoteGroup.isEmpty ? nil : remote.remoteGroup,
-                    remoteIcon: nil,
+                    remoteIcon: remote.remoteIcon.rawValue,
                     connectionMethod: remote.connectionMethod.rawValue,
                     jumpRemoteID: remote.jumpRemoteID,
-                    sshJumpMode: nil,
+                    sshJumpMode: remote.portableSSHJumpMode,
                     savedProxyID: remote.savedProxyID,
                     proxyType: remote.proxyType == .none ? nil : remote.proxyType.rawValue,
                     proxyHost: remote.proxyHost,
                     proxyPort: remote.proxyPort,
                     tailscaleLoginServer: remote.tailscaleLoginServer,
                     tailscaleHostname: remote.tailscaleNodeName,
-                    moshCommand: nil,
+                    moshCommand: remote.portableMoshCommand,
                     moshServerCommand: remote.moshServerCommand,
-                    jumpMoshCommand: nil
+                    jumpMoshCommand: remote.portableJumpMoshCommand,
+                    jumpMoshServerCommand: remote.jumpMoshServerCommand.isEmpty
+                        ? nil
+                        : remote.jumpMoshServerCommand,
+                    moshUDPPort: remote.moshUDPPort.isEmpty ? nil : remote.moshUDPPort,
+                    inspectionEnabled: remote.inspectionEnabled,
+                    inspectionIntervalMinutes: remote.inspectionIntervalMinutes
                 )
             },
             proxies: proxyStore.proxies.map { proxy in
@@ -178,8 +190,13 @@ extension RemoteStore {
             remote.host = portable.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "127.0.0.1" : portable.host
             remote.port = portable.port
             remote.username = portable.username
+            remote.remoteStartPath = portable.remoteStartPath ?? ""
             remote.remoteGroup = portable.remoteGroup ?? ""
+            remote.remoteIcon = portable.remoteIcon.flatMap(MobileRemoteIcon.init(rawValue:)) ?? .server
+            remote.accentHex = portable.accentHex
             remote.authentication = MobileAuthentication(rawValue: portable.authentication) ?? .privateKey
+            remote.hostKeyPolicy = MobileHostKeyPolicy(rawValue: portable.hostKeyPolicy) ?? .ask
+            remote.keepAliveSeconds = max(0, portable.keepAliveSeconds)
             remote.connectionMethod = MobileConnectionMethod(rawValue: portable.connectionMethod) ?? .ssh
             remote.jumpRemoteID = portable.jumpRemoteID.flatMap { idMap[$0] ?? $0 }
             remote.savedProxyID = portable.savedProxyID.flatMap { proxyIDMap[$0] ?? $0 }
@@ -189,6 +206,17 @@ extension RemoteStore {
             remote.tailscaleLoginServer = portable.tailscaleLoginServer ?? ""
             remote.tailscaleNodeName = portable.tailscaleHostname ?? ""
             remote.moshServerCommand = portable.moshServerCommand ?? "mosh-server"
+            remote.jumpMoshServerCommand = portable.jumpMoshServerCommand ?? ""
+            remote.moshUDPPort = portable.moshUDPPort ?? ""
+            remote.portableSSHJumpMode = portable.sshJumpMode
+            remote.portableMoshCommand = portable.moshCommand
+            remote.portableJumpMoshCommand = portable.jumpMoshCommand
+            if let inspectionEnabled = portable.inspectionEnabled {
+                remote.inspectionEnabled = inspectionEnabled
+            }
+            if let interval = portable.inspectionIntervalMinutes {
+                remote.inspectionIntervalMinutes = max(1, interval)
+            }
             if let index = remotes.firstIndex(where: { $0.id == finalID }) {
                 remotes[index] = remote
                 updated += 1

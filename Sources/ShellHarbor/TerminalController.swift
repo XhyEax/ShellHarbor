@@ -104,6 +104,10 @@ final class TerminalController: ObservableObject {
         processDelegateBridge
     }
 
+    var hasRetainedTerminalView: Bool {
+        retainedTerminalView != nil
+    }
+
     func retainTerminalView(_ view: LocalProcessTerminalView) {
         retainedTerminalView = view
     }
@@ -254,7 +258,13 @@ final class TerminalController: ObservableObject {
         }
         restoredPendingCommand = preservedState.pendingCommand
         restoredCommandScheduled = false
-        if directoryTracker.currentDirectory == nil {
+        if profile.isLocalConnection {
+            // A restored Local session may contain the directory from the old
+            // shell (for example `/`). Starting a new local process must obey
+            // the configured Local starting directory instead of allowing the
+            // restoration snapshot to override it indefinitely.
+            directoryTracker.restore(profile.remoteStartPath)
+        } else if directoryTracker.currentDirectory == nil {
             directoryTracker.restore(profile.remoteStartPath)
         }
         guard profile.isConnectable else {
@@ -318,6 +328,7 @@ final class TerminalController: ObservableObject {
         }
     }
 
+
     func beginPreparingConnection() {
         state = .connecting
     }
@@ -333,15 +344,36 @@ final class TerminalController: ObservableObject {
 
     func processTerminated(exitCode: Int32?, for token: UUID) {
         guard token == connectionToken else { return }
+        let outputSummary = retainedTerminalView.flatMap { view -> String? in
+            let data = view.getTerminal().getBufferAsData(kind: .normal)
+            guard let output = String(data: data, encoding: .utf8) else {
+                return nil
+            }
+            let summary = CommandOutputSummary.text(output)
+            return summary.isEmpty ? nil : summary
+        }
         invocation = nil
         processDelegateBridge = nil
         if case .disconnected = state { return }
         if let exitCode, exitCode == 0 {
             state = .disconnected
         } else if let exitCode {
-            state = .failed("\(processDescription) 已退出，状态码 \(exitCode)")
+            // forkpty reports waitpid's encoded status (for example 10 is
+            // surfaced as 2560). Present the actual process exit code.
+            let displayedCode = exitCode > 255 && exitCode & 0xff == 0
+                ? exitCode >> 8
+                : exitCode
+            var message = "\(processDescription) 已退出，状态码 \(displayedCode)"
+            if let outputSummary {
+                message += "\n\n退出前输出：\n\(outputSummary)"
+            }
+            state = .failed(message)
         } else {
-            state = .failed("\(processDescription) 进程异常结束")
+            var message = "\(processDescription) 进程异常结束"
+            if let outputSummary {
+                message += "\n\n退出前输出：\n\(outputSummary)"
+            }
+            state = .failed(message)
         }
     }
 

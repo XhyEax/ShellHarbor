@@ -196,7 +196,7 @@ public final class SHTailscaleProxyProcess {
         else { throw SHCLIError.tailscaleHelperUnavailable }
         let client = executable.resolvingSymlinksInPath()
             .deletingLastPathComponent()
-            .appendingPathComponent("tailscale-mosh-client")
+            .appendingPathComponent("tailscale-proxy-helper")
         guard FileManager.default.isExecutableFile(atPath: client.path) else {
             throw SHCLIError.tailscaleHelperUnavailable
         }
@@ -206,6 +206,7 @@ public final class SHTailscaleProxyProcess {
             1
         )
         setenv("SHELLHARBOR_TAILSCALE_TARGET", target, 1)
+        setenv("SHELLHARBOR_HELPER_MODE", "mosh-client", 1)
         return client.path
     }
 
@@ -394,7 +395,7 @@ public enum SHRemoteStore {
     }
 }
 
-private enum SHPasswordCipher {
+public enum SHPasswordCipher {
     static let prefix = "rsa:v1:"
     private static let algorithm: SecKeyAlgorithm = .rsaEncryptionOAEPSHA256
 
@@ -403,11 +404,11 @@ private enum SHPasswordCipher {
         let sealedPassword: Data
     }
 
-    static func isEncrypted(_ value: String) -> Bool {
+    public static func isEncrypted(_ value: String) -> Bool {
         value.hasPrefix(prefix)
     }
 
-    static func decrypt(_ ciphertext: String) throws -> String {
+    public static func decrypt(_ ciphertext: String) throws -> String {
         let keyURL = FileManager.default.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask
@@ -417,6 +418,13 @@ private enum SHPasswordCipher {
         guard let keyData = try? Data(contentsOf: keyURL) else {
             throw SHCLIError.privateKeyUnavailable
         }
+        return try decrypt(ciphertext, privateKeyData: keyData)
+    }
+
+    public static func decrypt(
+        _ ciphertext: String,
+        privateKeyData keyData: Data
+    ) throws -> String {
         let attributes: [String: Any] = [
             kSecAttrKeyType as String: kSecAttrKeyTypeRSA,
             kSecAttrKeyClass as String: kSecAttrKeyClassPrivate,
@@ -503,6 +511,37 @@ public struct SHSSHInvocation {
     public init(executablePath: String, arguments: [String]) {
         self.executablePath = executablePath
         self.arguments = arguments
+    }
+}
+
+public struct SHSCPTransfer: Equatable {
+    public enum Direction: Equatable {
+        case upload
+        case download
+    }
+
+    public let localPath: String
+    public let remotePath: String
+    public let direction: Direction
+
+    public static func detect(
+        from source: String,
+        to destination: String,
+        fileManager: FileManager = .default
+    ) -> SHSCPTransfer {
+        let expandedSource = NSString(string: source).expandingTildeInPath
+        if fileManager.fileExists(atPath: expandedSource) {
+            return SHSCPTransfer(
+                localPath: expandedSource,
+                remotePath: destination,
+                direction: .upload
+            )
+        }
+        return SHSCPTransfer(
+            localPath: NSString(string: destination).expandingTildeInPath,
+            remotePath: source,
+            direction: .download
+        )
     }
 }
 
@@ -600,6 +639,67 @@ public enum SHSSHCommandBuilder {
         }
         arguments += ["--", "\(profile.resolvedUsername)@\(profile.resolvedHost)"]
         return SHSSHInvocation(executablePath: mosh, arguments: arguments)
+    }
+
+    public static func buildSCP(
+        profile: SHRemoteProfile,
+        jumpProfile: SHRemoteProfile?,
+        transfer: SHSCPTransfer,
+        targetPasswordDescriptor: Int32?,
+        jumpPasswordDescriptor: Int32?
+    ) throws -> SHSSHInvocation {
+        guard profile.isConnectable else {
+            throw SHCLIError.invalidRemote(profile.name)
+        }
+        var arguments = ["-P", String(profile.resolvedPort)]
+        arguments += hostKeyArguments(for: profile)
+        arguments += try routeArguments(
+            profile: profile,
+            jumpProfile: jumpProfile,
+            jumpPasswordDescriptor: jumpPasswordDescriptor
+        )
+        let keepAlive = profile.keepAliveSeconds ?? 30
+        if keepAlive > 0 {
+            arguments += ["-o", "ServerAliveInterval=\(keepAlive)"]
+        }
+        if
+            profile.resolvedAuthentication == "privateKey",
+            let keyPath = profile.privateKeyPath,
+            !keyPath.isEmpty
+        {
+            arguments += [
+                "-i",
+                NSString(string: keyPath).expandingTildeInPath
+            ]
+        }
+        arguments.append("-r")
+        let remote = "\(profile.resolvedUsername)@\(profile.resolvedHost):\(transfer.remotePath)"
+        switch transfer.direction {
+        case .upload:
+            arguments += [transfer.localPath, remote]
+        case .download:
+            arguments += [remote, transfer.localPath]
+        }
+
+        guard profile.usesPassword else {
+            return SHSSHInvocation(
+                executablePath: "/usr/bin/scp",
+                arguments: arguments
+            )
+        }
+        guard
+            let targetPasswordDescriptor,
+            let sshpass = sshpassPath()
+        else {
+            throw SHCLIError.sshpassUnavailable
+        }
+        return SHSSHInvocation(
+            executablePath: sshpass,
+            arguments: [
+                "-d", String(targetPasswordDescriptor),
+                "/usr/bin/scp"
+            ] + arguments
+        )
     }
 
     /// Bash login shells do not normally source ~/.bashrc. shcli explicitly

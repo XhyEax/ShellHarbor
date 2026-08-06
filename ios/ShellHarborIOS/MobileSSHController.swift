@@ -3,6 +3,7 @@ import Crypto
 import Darwin
 import Foundation
 import NIOCore
+import NIOPosix
 import NIOSSH
 import Observation
 
@@ -24,16 +25,160 @@ enum MobileSSHState: Equatable {
     }
 }
 
+private struct MobilePendingTerminalInput {
+    private(set) var text = ""
+    private(set) var isReliable = true
+    private var cursorOffset = 0
+
+    mutating func restore(_ value: String?) {
+        text = value ?? ""
+        cursorOffset = text.count
+        isReliable = true
+    }
+
+    mutating func record(_ bytes: [UInt8]) {
+        var index = 0
+        while index < bytes.count {
+            let byte = bytes[index]
+            if byte == 0x1B {
+                if let consumed = handleEscapeSequence(Array(bytes[index...])) {
+                    index += consumed
+                } else {
+                    isReliable = false
+                    index += 1
+                }
+                continue
+            }
+            switch byte {
+            case 0x0A, 0x0D, 0x03:
+                clear()
+                index += 1
+            case 0x7F, 0x08:
+                removeBeforeCursor()
+                index += 1
+            case 0x01:
+                cursorOffset = 0
+                index += 1
+            case 0x05:
+                cursorOffset = text.count
+                index += 1
+            case 0x04:
+                removeAtCursor()
+                index += 1
+            case 0x15:
+                clear()
+                index += 1
+            case 0x17:
+                removePreviousWord()
+                index += 1
+            case 0x09:
+                isReliable = false
+                index += 1
+            case 0x00...0x1F:
+                index += 1
+            default:
+                let start = index
+                while index < bytes.count,
+                      bytes[index] >= 0x20,
+                      bytes[index] != 0x7F,
+                      bytes[index] != 0x1B {
+                    index += 1
+                }
+                insert(String(decoding: bytes[start..<index], as: UTF8.self))
+            }
+        }
+    }
+
+    private mutating func handleEscapeSequence(_ bytes: [UInt8]) -> Int? {
+        if bytes.starts(with: [0x1B, 0x5B, 0x44]) {
+            moveCursor(by: -1)
+            return 3
+        }
+        if bytes.starts(with: [0x1B, 0x5B, 0x43]) {
+            moveCursor(by: 1)
+            return 3
+        }
+        if bytes.starts(with: [0x1B, 0x5B, 0x48]) {
+            cursorOffset = 0
+            return 3
+        }
+        if bytes.starts(with: [0x1B, 0x5B, 0x46]) {
+            cursorOffset = text.count
+            return 3
+        }
+        if bytes.starts(with: [0x1B, 0x5B, 0x33, 0x7E]) {
+            removeAtCursor()
+            return 4
+        }
+        if bytes.starts(with: [0x1B, 0x5B, 0x32, 0x30, 0x30, 0x7E]) ||
+            bytes.starts(with: [0x1B, 0x5B, 0x32, 0x30, 0x31, 0x7E]) {
+            return 6
+        }
+        if bytes.starts(with: [0x1B, 0x5B, 0x41]) ||
+            bytes.starts(with: [0x1B, 0x5B, 0x42]) {
+            isReliable = false
+            return 3
+        }
+        return nil
+    }
+
+    private mutating func insert(_ value: String) {
+        let index = text.index(text.startIndex, offsetBy: cursorOffset)
+        text.insert(contentsOf: value, at: index)
+        cursorOffset += value.count
+    }
+
+    private mutating func moveCursor(by offset: Int) {
+        cursorOffset = min(max(cursorOffset + offset, 0), text.count)
+    }
+
+    private mutating func removeBeforeCursor() {
+        guard cursorOffset > 0 else { return }
+        let index = text.index(text.startIndex, offsetBy: cursorOffset - 1)
+        text.remove(at: index)
+        cursorOffset -= 1
+    }
+
+    private mutating func removeAtCursor() {
+        guard cursorOffset < text.count else { return }
+        text.remove(at: text.index(text.startIndex, offsetBy: cursorOffset))
+    }
+
+    private mutating func removePreviousWord() {
+        while cursorOffset > 0, characterBeforeCursor?.isWhitespace == true {
+            removeBeforeCursor()
+        }
+        while cursorOffset > 0, characterBeforeCursor?.isWhitespace == false {
+            removeBeforeCursor()
+        }
+    }
+
+    private var characterBeforeCursor: Character? {
+        guard cursorOffset > 0 else { return nil }
+        return text[text.index(text.startIndex, offsetBy: cursorOffset - 1)]
+    }
+
+    private mutating func clear() {
+        text = ""
+        cursorOffset = 0
+        isReliable = true
+    }
+}
+
 enum MobileSSHError: LocalizedError {
+    case missingPassword
     case missingIdentity
     case unreadableIdentity
     case unsupportedIdentity
+    case unavailableSSHAgent
 
     var errorDescription: String? {
         switch self {
+        case .missingPassword: "该 Remote 使用密码认证，但尚未填写密码。请编辑 Remote 后重试。"
         case .missingIdentity: "该 Remote 尚未选择私钥。"
         case .unreadableIdentity: "无法读取所选私钥。"
         case .unsupportedIdentity: "目前终端支持 RSA 和 ED25519 OpenSSH 私钥。"
+        case .unavailableSSHAgent: "iOS 无法访问 macOS 的 SSH Agent；请为此 Remote 选择已导入的私钥或密码。"
         }
     }
 }
@@ -113,12 +258,57 @@ private final class MobileHostTrustBox: @unchecked Sendable {
 @MainActor
 @Observable
 final class MobileSSHController {
-    private(set) var state = MobileSSHState.idle
+    private(set) var state = MobileSSHState.idle {
+        didSet {
+            if Self.connectionIntent(for: state) != Self.connectionIntent(for: oldValue) {
+                onRestorationChanged?()
+            }
+        }
+    }
     private(set) var hostKeyPrompt: MobileHostKeyPrompt?
-    var title = ""
-    var lastDirectory: String?
+    private(set) var clearRequestID = UUID()
+    private(set) var searchRequestID = UUID()
+    private(set) var keyboardToggleRequestID = UUID()
+    private(set) var searchTerm = ""
+    private(set) var searchForward = true
+    private(set) var searchFound: Bool?
+    private(set) var shouldClearSearch = false
+    var title = "" {
+        didSet { if title != oldValue { onRestorationChanged?() } }
+    }
+    var lastDirectory: String? {
+        didSet { if lastDirectory != oldValue { onRestorationChanged?() } }
+    }
+    @ObservationIgnored var onRestorationChanged: (() -> Void)?
+
+    func findTerminalText(_ term: String, forward: Bool) {
+        guard !term.isEmpty else {
+            clearTerminalSearch()
+            return
+        }
+        searchTerm = term
+        searchForward = forward
+        shouldClearSearch = false
+        searchRequestID = UUID()
+    }
+
+    func clearTerminalSearch() {
+        searchTerm = ""
+        searchFound = nil
+        shouldClearSearch = true
+        searchRequestID = UUID()
+    }
+
+    func toggleTerminalKeyboard() {
+        keyboardToggleRequestID = UUID()
+    }
+
+    func updateSearchResult(found: Bool) {
+        searchFound = found
+    }
 
     @ObservationIgnored private var connectionTask: Task<Void, Never>?
+    @ObservationIgnored private var keepAliveTask: Task<Void, Never>?
     @ObservationIgnored private var client: SSHClient?
     @ObservationIgnored private var jumpClient: SSHClient?
     @ObservationIgnored private var fileClient: SSHClient?
@@ -131,8 +321,15 @@ final class MobileSSHController {
     @ObservationIgnored private var moshKey: String?
     @ObservationIgnored private var outputHandler: (@MainActor ([UInt8]) -> Void)?
     @ObservationIgnored private var outputHistory: [UInt8] = []
+    @ObservationIgnored private var pendingInput = MobilePendingTerminalInput()
+    @ObservationIgnored private var restoredPendingCommand: String?
+    @ObservationIgnored private var restoredInputTask: Task<Void, Never>?
+    @ObservationIgnored private var startupCommandTask: Task<Void, Never>?
+    @ObservationIgnored private var lastOutputAt = ContinuousClock.now
+    @ObservationIgnored private var hasReceivedLiveOutput = false
     @ObservationIgnored private var pendingHostKeyDecision: (@Sendable (Bool) -> Void)?
     @ObservationIgnored private var pendingStartupCommand: String?
+    @ObservationIgnored private let configuredStartupCommand: String?
     @ObservationIgnored private let trustHostKey: @MainActor (String) -> Void
     @ObservationIgnored private let trustJumpHostKey: @MainActor (String) -> Void
     @ObservationIgnored private let autoTrustNewHosts: Bool
@@ -157,6 +354,7 @@ final class MobileSSHController {
         autoTrustNewHosts: Bool = false,
         tailscaleProxyManager: MobileTailscaleProxyManager? = nil,
         restoredOutputHistory: Data = Data(),
+        restoredPendingCommand: String? = nil,
         restoredDirectory: String? = nil,
         restoredMoshState: Data = Data(),
         restoredMoshServerPort: Int? = nil,
@@ -173,26 +371,63 @@ final class MobileSSHController {
         self.trustJumpHostKey = trustJumpHostKey
         self.autoTrustNewHosts = autoTrustNewHosts
         self.tailscaleProxyManager = tailscaleProxyManager
-        outputHistory = Array(restoredOutputHistory.suffix(4_000_000))
-        lastDirectory = restoredDirectory
+        outputHistory = Array(restoredOutputHistory.suffix(Self.maximumRestorationBytes))
+        self.restoredPendingCommand = restoredPendingCommand
+        pendingInput.restore(restoredPendingCommand)
+        let requestedDirectory = (restoredDirectory ?? remote.remoteStartPath)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        lastDirectory = requestedDirectory.isEmpty ? nil : requestedDirectory
         moshEncodedState = restoredMoshState
         moshServerPort = restoredMoshServerPort
         moshKey = restoredMoshKey
-        pendingStartupCommand = startupCommand
+        var startup: [String] = []
+        if !requestedDirectory.isEmpty {
+            startup.append(Self.changeDirectoryCommand(requestedDirectory))
+        }
+        if let startupCommand,
+           !startupCommand.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            startup.append(startupCommand)
+        }
+        let configuredStartup = startup.isEmpty ? nil : startup.joined(separator: " && ")
+        configuredStartupCommand = configuredStartup
+        pendingStartupCommand = configuredStartup
     }
 
     func restorationOutputHistory() -> Data {
-        Data(outputHistory.suffix(4_000_000))
+        Data(outputHistory.suffix(Self.maximumRestorationBytes))
+    }
+
+    func restorationPendingCommand() -> String? {
+        guard pendingInput.isReliable, !pendingInput.text.isEmpty else { return nil }
+        return pendingInput.text
     }
 
     func restorationMoshState() -> Data { moshEncodedState }
     func restorationMoshServerPort() -> Int? { moshServerPort }
     func restorationMoshKey() -> String? { moshKey }
 
+    var hasConnectionIntent: Bool {
+        Self.connectionIntent(for: state)
+    }
+
+    private static func connectionIntent(for state: MobileSSHState) -> Bool {
+        switch state {
+        case .idle, .disconnected:
+            false
+        case .connecting, .connected, .failed:
+            true
+        }
+    }
+
     func connect(output: @escaping @MainActor ([UInt8]) -> Void) {
         outputHandler = output
         if !outputHistory.isEmpty { output(outputHistory) }
         guard connectionTask == nil else { return }
+        if pendingStartupCommand == nil {
+            pendingStartupCommand = configuredStartupCommand
+        }
+        hasReceivedLiveOutput = false
+        lastOutputAt = .now
         state = .connecting
         connectionTask = Task { [weak self] in
             guard let self else { return }
@@ -205,6 +440,8 @@ final class MobileSSHController {
                 self.state = .failed(Self.safeMessage(for: error))
             }
             self.writer = nil
+            self.keepAliveTask?.cancel()
+            self.keepAliveTask = nil
             self.client = nil
             self.jumpClient = nil
             self.connectionTask = nil
@@ -214,6 +451,12 @@ final class MobileSSHController {
     func disconnect() {
         connectionTask?.cancel()
         connectionTask = nil
+        restoredInputTask?.cancel()
+        restoredInputTask = nil
+        startupCommandTask?.cancel()
+        startupCommandTask = nil
+        keepAliveTask?.cancel()
+        keepAliveTask = nil
         writer = nil
         moshTransport?.stop()
         moshTransport = nil
@@ -241,6 +484,7 @@ final class MobileSSHController {
         let sftp = try await activeSFTPClient()
         let resolved = try await sftp.getRealPath(atPath: path.isEmpty ? "." : path)
         let responses = try await sftp.listDirectory(atPath: resolved)
+        let creationDates = (try? await remoteCreationDates(in: resolved)) ?? [:]
         let entries = responses.flatMap(\.components)
             .filter { $0.filename != "." && $0.filename != ".." }
             .map { component in
@@ -249,13 +493,46 @@ final class MobileSSHController {
                     path: Self.joinRemotePath(resolved, component.filename),
                     size: component.attributes.size,
                     permissions: component.attributes.permissions,
-                    modifiedAt: component.attributes.accessModificationTime?.modificationTime
+                    modifiedAt: component.attributes.accessModificationTime?.modificationTime,
+                    createdAt: creationDates[component.filename]
                 )
             }
             .sorted {
                 return $0.name.localizedStandardCompare($1.name) == .orderedAscending
             }
         return (resolved, entries)
+    }
+
+    private func remoteCreationDates(in directory: String) async throws -> [String: Date] {
+        let command = """
+        cd -- \(Self.shellQuote(directory)) && \
+        { setopt NULL_GLOB 2>/dev/null || true; } && \
+        if stat -f '%B' . >/dev/null 2>&1; then stat_style=bsd; else stat_style=gnu; fi; \
+        for f in .[^.]* *; do \
+          [ "$f" = "." ] && continue; [ "$f" = ".." ] && continue; \
+          [ -e "$f" ] || [ -L "$f" ] || continue; \
+          if [ "$stat_style" = bsd ]; then c=$(stat -f '%B' "$f" 2>/dev/null || printf '0'); \
+          else c=$(stat -c '%W' -- "$f" 2>/dev/null || printf '0'); fi; \
+          printf '%s\\t%s\\n' "$c" "$f"; \
+        done
+        """
+        let output = try await executeInspectionCommand(command)
+        return output.split(separator: "\n").reduce(into: [:]) { result, line in
+            let parts = line.split(separator: "\t", maxSplits: 1, omittingEmptySubsequences: false)
+            guard parts.count == 2,
+                  let timestamp = TimeInterval(parts[0]),
+                  timestamp > 0 else { return }
+            result[String(parts[1])] = Date(timeIntervalSince1970: timestamp)
+        }
+    }
+
+    func sftpResolvedPathAndKind(at path: String) async throws -> (path: String, isDirectory: Bool) {
+        let sftp = try await activeSFTPClient()
+        let requested = path.isEmpty ? "." : path
+        let resolved = try await sftp.getRealPath(atPath: requested)
+        let attributes = try await sftp.getAttributes(at: resolved)
+        let isDirectory = (attributes.permissions ?? 0) & 0o170000 == 0o040000
+        return (resolved, isDirectory)
     }
 
     func sftpDownload(
@@ -295,6 +572,49 @@ final class MobileSSHController {
         }
     }
 
+    func sftpDownload(
+        path: String,
+        to destination: URL,
+        progress: (@MainActor (Int64, Int64) -> Void)? = nil,
+        waitIfPaused: (@MainActor () async throws -> Void)? = nil
+    ) async throws {
+        let sftp = try await activeSFTPClient()
+        let attributes = try await sftp.getAttributes(at: path)
+        let total = Int64(attributes.size ?? 0)
+        try FileManager.default.createDirectory(
+            at: destination.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        _ = FileManager.default.createFile(atPath: destination.path, contents: nil)
+        let output = try FileHandle(forWritingTo: destination)
+        do {
+            try await sftp.withFile(filePath: path, flags: .read) { file in
+                var offset: UInt64 = 0
+                while true {
+                    if let expected = attributes.size, offset >= expected { break }
+                    try Task.checkCancellation()
+                    try await waitIfPaused?()
+                    let remaining = attributes.size.map { Int($0 - offset) } ?? 256 * 1024
+                    let length = UInt32(min(256 * 1024, remaining))
+                    let buffer = try await file.read(from: offset, length: length)
+                    guard buffer.readableBytes > 0 else { break }
+                    let data = Data(buffer.readableBytesView)
+                    try output.write(contentsOf: data)
+                    offset += UInt64(data.count)
+                    await progress?(Int64(offset), total)
+                }
+                if let expected = attributes.size, offset != expected {
+                    throw MobileSFTPError.incompleteTransfer(expected: expected, received: offset)
+                }
+            }
+            try output.close()
+        } catch {
+            try? output.close()
+            try? FileManager.default.removeItem(at: destination)
+            throw error
+        }
+    }
+
     func sftpUpload(
         data: Data,
         to path: String,
@@ -314,6 +634,37 @@ final class MobileSSHController {
                 offset = end
                 await progress?(Int64(offset), Int64(data.count))
             }
+        }
+    }
+
+    func sftpUpload(
+        fileURL: URL,
+        to path: String,
+        progress: (@MainActor (Int64, Int64) -> Void)? = nil,
+        waitIfPaused: (@MainActor () async throws -> Void)? = nil
+    ) async throws {
+        let attributes = try FileManager.default.attributesOfItem(atPath: fileURL.path)
+        let total = (attributes[.size] as? NSNumber)?.int64Value ?? 0
+        let input = try FileHandle(forReadingFrom: fileURL)
+        let sftp = try await activeSFTPClient()
+        do {
+            try await sftp.withFile(filePath: path, flags: [.write, .create, .truncate]) { file in
+                var offset: UInt64 = 0
+                while true {
+                    try Task.checkCancellation()
+                    try await waitIfPaused?()
+                    guard let data = try input.read(upToCount: 256 * 1024), !data.isEmpty else { break }
+                    var buffer = ByteBufferAllocator().buffer(capacity: data.count)
+                    buffer.writeBytes(data)
+                    try await file.write(buffer, at: offset)
+                    offset += UInt64(data.count)
+                    await progress?(Int64(offset), total)
+                }
+            }
+            try input.close()
+        } catch {
+            try? input.close()
+            throw error
         }
     }
 
@@ -344,6 +695,25 @@ final class MobileSSHController {
         return String(decoding: response.readableBytesView, as: UTF8.self)
     }
 
+    func loadCommandHistory() async throws -> [MobileCommandHistoryEntry] {
+        let output = try await executeInspectionCommand(MobileRemoteHistoryService.script)
+        return MobileRemoteHistoryService.parse(output)
+    }
+
+    func insertTerminalText(_ text: String) {
+        guard state == .connected else { return }
+        let bytes = Array(text.utf8)
+        send(bytes[...])
+    }
+
+    func insertRemotePaths(_ paths: [String]) {
+        let text = paths
+            .filter { !$0.isEmpty }
+            .map(Self.shellQuote)
+            .joined(separator: " ")
+        insertTerminalText(text)
+    }
+
     private func sftpDelete(_ file: MobileRemoteFile, using sftp: SFTPClient) async throws {
         try Task.checkCancellation()
         guard file.isDirectory else {
@@ -368,6 +738,7 @@ final class MobileSSHController {
 
     func reconnect() {
         guard let outputHandler else { return }
+        restoredPendingCommand = restorationPendingCommand()
         disconnect()
         connect(output: outputHandler)
     }
@@ -394,6 +765,12 @@ final class MobileSSHController {
     }
 
     func send(_ bytes: ArraySlice<UInt8>) {
+        pendingInput.record(Array(bytes))
+        onRestorationChanged?()
+        sendWithoutTracking(bytes)
+    }
+
+    private func sendWithoutTracking(_ bytes: ArraySlice<UInt8>) {
         if let moshTransport {
             moshTransport.send(Array(bytes))
             return
@@ -405,6 +782,66 @@ final class MobileSSHController {
             buffer.writeBytes(copy)
             try? await writer.write(buffer)
         }
+    }
+
+    func sendInterrupt() {
+        guard state == .connected else { return }
+        let interrupt: [UInt8] = [0x03]
+        send(interrupt[...])
+    }
+
+    func startLocalPortForward(
+        bindHost: String,
+        listenPort: Int,
+        targetHost: String,
+        targetPort: Int
+    ) async throws -> Channel {
+        guard state == .connected, let client, client.isConnected else {
+            throw MobilePortForwardError.sessionNotConnected
+        }
+        let sshClient = client
+        return try await ServerBootstrap(group: sshClient.eventLoop)
+            .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
+            .childChannelOption(ChannelOptions.autoRead, value: false)
+            .childChannelInitializer { localChannel in
+                localChannel.eventLoop.makeFutureWithTask {
+                    let origin: SocketAddress
+                    if let remoteAddress = localChannel.remoteAddress {
+                        origin = remoteAddress
+                    } else {
+                        origin = try SocketAddress(
+                            ipAddress: "127.0.0.1",
+                            port: 0
+                        )
+                    }
+                    let (localGlue, sshGlue) = MobilePortForwardGlue.matchedPair()
+                    let sshChannel = try await sshClient.createDirectTCPIPChannel(
+                        using: SSHChannelType.DirectTCPIP(
+                            targetHost: targetHost,
+                            targetPort: targetPort,
+                            originatorAddress: origin
+                        )
+                    ) { channel in
+                        channel.pipeline.addHandler(sshGlue)
+                    }
+                    try await localChannel.pipeline.addHandler(localGlue).get()
+                    try await localChannel.setOption(
+                        ChannelOptions.autoRead,
+                        value: true
+                    ).get()
+                    try await sshChannel.setOption(
+                        ChannelOptions.autoRead,
+                        value: true
+                    ).get()
+                }
+            }
+            .bind(host: bindHost, port: listenPort)
+            .get()
+    }
+
+    func clearLocalBuffer() {
+        outputHistory.removeAll(keepingCapacity: true)
+        clearRequestID = UUID()
     }
 
     func resize(cols: Int, rows: Int, pixelWidth: Int, pixelHeight: Int) {
@@ -522,8 +959,11 @@ final class MobileSSHController {
         using jumpClient: SSHClient,
         jumpProfile: MobileRemoteProfile
     ) async throws {
-        let configuredServer = jumpProfile.moshServerCommand
+        let configuredForSession = remote.jumpMoshServerCommand
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        let configuredServer = configuredForSession.isEmpty
+            ? jumpProfile.moshServerCommand.trimmingCharacters(in: .whitespacesAndNewlines)
+            : configuredForSession
         let executable = configuredServer.isEmpty ? "mosh-server" : configuredServer
         let requestedPort = remote.moshUDPPort.trimmingCharacters(in: .whitespacesAndNewlines)
         if !requestedPort.isEmpty,
@@ -609,10 +1049,19 @@ final class MobileSSHController {
                 Task { @MainActor [weak self] in
                     self?.state = .connected
                     self?.runStartupCommandIfNeeded()
+                    self?.scheduleRestoredInputIfNeeded()
                 }
             },
             onOutput: { [weak self] bytes in
-                Task { @MainActor [weak self] in self?.deliver(bytes) }
+                // The pipe reader invokes this callback serially. Preserve
+                // that byte order with the main dispatch queue's FIFO rather
+                // than creating independent Tasks, whose execution order is
+                // unspecified. Mosh emits cursor-addressed screen diffs, so
+                // even one reordered chunk corrupts nested SSH and command
+                // output with missing characters and shifted columns.
+                DispatchQueue.main.async { [weak self] in
+                    self?.deliver(bytes)
+                }
             },
             onState: { [weak self] state in
                 Task { @MainActor [weak self] in self?.moshEncodedState = state }
@@ -633,6 +1082,14 @@ final class MobileSSHController {
 
     nonisolated private static func shellQuote(_ value: String) -> String {
         "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
+    }
+
+    nonisolated private static func changeDirectoryCommand(_ path: String) -> String {
+        if path == "~" { return "cd -- \"$HOME\"" }
+        if path.hasPrefix("~/") {
+            return "cd -- \"$HOME\"/\(shellQuote(String(path.dropFirst(2))))"
+        }
+        return "cd -- \(shellQuote(path))"
     }
 
     nonisolated private static func numericHost(_ host: String) throws -> String {
@@ -683,9 +1140,21 @@ final class MobileSSHController {
         for profile: MobileRemoteProfile,
         identityURL: URL?
     ) throws -> SSHAuthenticationMethod {
-        if profile.authentication == .password {
+        switch profile.authentication {
+        case .password:
             let password = try MobilePasswordCipher.decrypt(profile.password)
+            guard !password.isEmpty else { throw MobileSSHError.missingPassword }
             return .passwordBased(username: profile.username, password: password)
+        case .agent:
+            // iOS has no macOS-style ssh-agent. When exactly one imported key
+            // exists, ImportedKeyStore supplies it for a nil identity ID, so
+            // an imported macOS Agent profile can retain its intent and still
+            // connect without requiring a manual profile edit.
+            guard identityURL != nil else {
+                throw MobileSSHError.unavailableSSHAgent
+            }
+        case .privateKey:
+            break
         }
         guard let identityURL else { throw MobileSSHError.missingIdentity }
         guard let data = try? Data(contentsOf: identityURL),
@@ -718,6 +1187,7 @@ final class MobileSSHController {
                     fingerprint: fingerprint,
                     key: key,
                     changed: changed,
+                    policy: profile.hostKeyPolicy,
                     decision: decision
                 )
             }
@@ -731,9 +1201,14 @@ final class MobileSSHController {
         fingerprint: String,
         key: String,
         changed: Bool,
+        policy: MobileHostKeyPolicy,
         decision: @escaping @Sendable (Bool) -> Void
     ) {
-        if autoTrustNewHosts, !changed {
+        if policy == .strict {
+            decision(false)
+            return
+        }
+        if (policy == .acceptNew || autoTrustNewHosts), !changed {
             if endpoint == remote.hostKeyEndpoint {
                 hostTrust.set(key)
                 trustHostKey(key)
@@ -756,11 +1231,14 @@ final class MobileSSHController {
     }
 
     private func deliver(_ bytes: [UInt8]) {
+        hasReceivedLiveOutput = true
+        lastOutputAt = .now
         outputHistory.append(contentsOf: bytes)
-        if outputHistory.count > 4_000_000 {
-            outputHistory.removeFirst(outputHistory.count - 4_000_000)
+        if outputHistory.count > Self.maximumRestorationBytes {
+            outputHistory.removeFirst(outputHistory.count - Self.maximumRestorationBytes)
         }
         outputHandler?(bytes)
+        onRestorationChanged?()
     }
 
     private func setClient(_ client: SSHClient) {
@@ -788,14 +1266,69 @@ final class MobileSSHController {
     private func activate(_ writer: TTYStdinWriter) {
         self.writer = writer
         state = .connected
+        startKeepAliveIfNeeded()
         runStartupCommandIfNeeded()
+        scheduleRestoredInputIfNeeded()
+    }
+
+    private func startKeepAliveIfNeeded() {
+        keepAliveTask?.cancel()
+        guard remote.connectionMethod == .ssh, remote.keepAliveSeconds > 0 else { return }
+        let interval = UInt64(remote.keepAliveSeconds) * 1_000_000_000
+        keepAliveTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: interval)
+                guard !Task.isCancelled, let self, self.state == .connected,
+                      let client = self.client, client.isConnected else { continue }
+                _ = try? await client.executeCommand(":", maxResponseSize: 1_024)
+            }
+        }
     }
 
     private func runStartupCommandIfNeeded() {
-        guard let command = pendingStartupCommand else { return }
-        pendingStartupCommand = nil
-        send(Array("\(command)\r".utf8)[...])
+        guard pendingStartupCommand != nil, startupCommandTask == nil else { return }
+        // SSH channel activation is earlier than login-shell readiness. Wait
+        // for real terminal output and then for a quiet window, which means
+        // shell rc files and prompt drawing have settled. A bounded fallback
+        // still supports shells that intentionally print no prompt.
+        startupCommandTask = Task { [weak self] in
+            defer { self?.startupCommandTask = nil }
+            let clock = ContinuousClock()
+            let deadline = clock.now.advanced(by: .seconds(8))
+            while !Task.isCancelled {
+                guard let self, self.state == .connected else { return }
+                let quietLongEnough = clock.now - self.lastOutputAt >= .seconds(1)
+                if (self.hasReceivedLiveOutput && quietLongEnough) || clock.now >= deadline {
+                    guard let command = self.pendingStartupCommand else { return }
+                    self.pendingStartupCommand = nil
+                    self.sendWithoutTracking(Array(command.utf8)[...])
+                    do { try await Task.sleep(for: .milliseconds(120)) }
+                    catch { return }
+                    guard self.state == .connected else { return }
+                    self.sendWithoutTracking([0x0D][...])
+                    return
+                }
+                do { try await Task.sleep(for: .milliseconds(150)) }
+                catch { return }
+            }
+        }
     }
+
+    private func scheduleRestoredInputIfNeeded() {
+        guard restoredInputTask == nil,
+              let command = restoredPendingCommand,
+              !command.isEmpty else { return }
+        restoredInputTask = Task { [weak self] in
+            defer { self?.restoredInputTask = nil }
+            do { try await Task.sleep(for: .seconds(2)) }
+            catch { return }
+            guard let self, self.state == .connected else { return }
+            self.sendWithoutTracking(Array(command.utf8)[...])
+            self.restoredPendingCommand = nil
+        }
+    }
+
+    private static let maximumRestorationBytes = 16_777_216
 
     private func activeSFTPClient() async throws -> SFTPClient {
         guard state == .connected else { throw MobileSFTPError.notConnected }

@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import ShellHarborTS
 
@@ -6,11 +7,22 @@ private final class MobileGoTailscaleProxy: @unchecked Sendable {
     init(_ value: SHShellharbortsProxy) { self.value = value }
 }
 
+enum MobileTailscaleConnectionState: String, Sendable {
+    case disconnected
+    case connecting
+    case connected
+    case failed
+}
+
 actor MobileTailscaleProxyManager {
+    static let shared = MobileTailscaleProxyManager()
+
     private var proxies: [String: MobileGoTailscaleProxy] = [:]
     private var startingProxies: [String: Task<MobileGoTailscaleProxy, Error>] = [:]
     private var forwards: [String: Int] = [:]
     private var udpForwards: [String: Int] = [:]
+    private var connectionStates: [String: MobileTailscaleConnectionState] = [:]
+    private var connectionErrors: [String: String] = [:]
     private var nextPort = 15_040
     private var nextUDPPort = 16_040
 
@@ -26,6 +38,19 @@ actor MobileTailscaleProxyManager {
                 }
             }
         }
+    }
+
+    func connectionState(for profile: MobileRemoteProfile) -> MobileTailscaleConnectionState {
+        connectionStates[configurationKey(profile)] ?? .disconnected
+    }
+
+    func connectionError(for profile: MobileRemoteProfile) -> String? {
+        connectionErrors[configurationKey(profile)]
+    }
+
+    func effectiveNodeName(for profile: MobileRemoteProfile) -> String {
+        let configured = profile.tailscaleNodeName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return configured.isEmpty ? Self.defaultNodeName : configured
     }
 
     func forwardedEndpoint(for profile: MobileRemoteProfile) async throws -> (host: String, port: Int) {
@@ -93,15 +118,20 @@ actor MobileTailscaleProxyManager {
     ) async throws -> MobileGoTailscaleProxy {
         if let existing = proxies[key] { return existing }
         if let starting = startingProxies[key] { return try await starting.value }
+        let nodeName = effectiveNodeName(for: profile)
+        let loginServer = Self.normalizedLoginServer(profile.tailscaleLoginServer)
+        let authKey = try decryptedAuthKey(profile.tailscaleAuthKey)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !authKey.isEmpty else {
+            connectionStates[key] = .failed
+            connectionErrors[key] = MobileTailscaleError.missingAuthKey.localizedDescription
+            throw MobileTailscaleError.missingAuthKey
+        }
         guard let created = SHShellharbortsNewProxy() else {
             throw MobileTailscaleError.helperUnavailable
         }
         let proxy = MobileGoTailscaleProxy(created)
         let stateDirectory = try stateDirectory(for: key)
-        let hostname = profile.tailscaleNodeName.trimmingCharacters(in: .whitespacesAndNewlines)
-        let nodeName = hostname.isEmpty ? Self.defaultNodeName : hostname
-        let loginServer = Self.normalizedLoginServer(profile.tailscaleLoginServer)
-        let authKey = try decryptedAuthKey(profile.tailscaleAuthKey)
         let starting = Task.detached(priority: .userInitiated) {
             try proxy.value.start(
                 stateDirectory.path,
@@ -111,14 +141,20 @@ actor MobileTailscaleProxyManager {
             )
             return proxy
         }
+        connectionStates[key] = .connecting
+        connectionErrors[key] = nil
         startingProxies[key] = starting
         do {
             let ready = try await starting.value
             startingProxies[key] = nil
             proxies[key] = ready
+            connectionStates[key] = .connected
+            connectionErrors[key] = nil
             return ready
         } catch {
             startingProxies[key] = nil
+            connectionStates[key] = .failed
+            connectionErrors[key] = error.localizedDescription
             throw error
         }
     }
@@ -178,17 +214,21 @@ actor MobileTailscaleProxyManager {
 
     private func configurationKey(_ profile: MobileRemoteProfile) -> String {
         let shared = profile.proxyName.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !shared.isEmpty { return shared.lowercased() }
         let login = Self.normalizedLoginServer(profile.tailscaleLoginServer)
-        return login.isEmpty ? "tailscale.com" : login.lowercased()
+        let nodeName = effectiveNodeName(for: profile)
+        return [
+            shared.isEmpty ? "tailscale" : shared.lowercased(),
+            login.isEmpty ? "https://login.tailscale.com" : login.lowercased(),
+            nodeName.lowercased()
+        ].joined(separator: "|")
     }
 
     private func stateDirectory(for key: String) throws -> URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.temporaryDirectory
-        let safe = Data(key.utf8).base64EncodedString()
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "+", with: "-")
+        let safe = SHA256.hash(data: Data(key.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
         let url = base.appendingPathComponent("ShellHarbor/Tailscale/\(safe)", isDirectory: true)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
@@ -209,22 +249,18 @@ actor MobileTailscaleProxyManager {
         return trimmed.contains("://") ? trimmed : "https://\(trimmed)"
     }
 
-    private static let defaultNodeName: String = {
-        let defaults = UserDefaults.standard
-        if let saved = defaults.string(forKey: "mobileTailscaleNodeName"), !saved.isEmpty { return saved }
-        let generated = "shellharbor-\(String(UUID().uuidString.lowercased().prefix(8)))"
-        defaults.set(generated, forKey: "mobileTailscaleNodeName")
-        return generated
-    }()
+    private static let defaultNodeName = "shellharbor-ios"
 }
 
 enum MobileTailscaleError: LocalizedError {
     case helperUnavailable
     case invalidProxy
+    case missingAuthKey
     var errorDescription: String? {
         switch self {
         case .helperUnavailable: "ShellHarbor 网络 helper 不可用。"
         case .invalidProxy: "Proxy 主机或端口无效。"
+        case .missingAuthKey: "缺少 Tailscale 认证密钥，请在设置中编辑该共享 Proxy。"
         }
     }
 }

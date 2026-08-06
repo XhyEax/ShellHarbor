@@ -3,9 +3,64 @@ import Security
 import UniformTypeIdentifiers
 import XCTest
 @testable import ShellHarbor
+import ShellHarborCLIKit
 import SwiftTerm
 
 final class SSHCommandBuilderTests: XCTestCase {
+    func testLocalPortForwardBuildsSSHArguments() throws {
+        var profile = SessionProfile()
+        profile.host = "server.example"
+        profile.username = "alice"
+        profile.port = 2222
+        let rule = PortForwardRule(
+            direction: .local,
+            bindHost: "127.0.0.1",
+            listenPort: 8080,
+            destinationHost: "database.internal",
+            destinationPort: 5432
+        )
+
+        let invocation = try SSHCommandBuilder.portForward(
+            profile: profile,
+            rule: rule
+        )
+
+        XCTAssertEqual(invocation.executableURL.path, "/usr/bin/ssh")
+        XCTAssertTrue(invocation.arguments.contains("-N"))
+        XCTAssertTrue(invocation.arguments.contains("-L"))
+        XCTAssertTrue(
+            invocation.arguments.contains(
+                "127.0.0.1:8080:database.internal:5432"
+            )
+        )
+        XCTAssertEqual(invocation.arguments.last, "alice@server.example")
+    }
+
+    func testDynamicPortForwardOmitsDestination() throws {
+        var profile = SessionProfile()
+        profile.host = "server.example"
+        let rule = PortForwardRule(
+            direction: .dynamic,
+            bindHost: "127.0.0.1",
+            listenPort: 1080,
+            destinationHost: "",
+            destinationPort: 0
+        )
+
+        let invocation = try SSHCommandBuilder.portForward(
+            profile: profile,
+            rule: rule
+        )
+
+        XCTAssertTrue(invocation.arguments.contains("-D"))
+        XCTAssertTrue(invocation.arguments.contains("127.0.0.1:1080"))
+        XCTAssertTrue(rule.isValid)
+    }
+
+    func testMacTailscaleDefaultNodeNameIsStable() {
+        XCTAssertEqual(TailscaleNodeIdentity.name, "shellharbor-mac")
+    }
+
     func testLocalPathCompletionFindsFilesAndDirectories() throws {
         let temporary = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -374,6 +429,67 @@ final class SSHCommandBuilderTests: XCTestCase {
         XCTAssertEqual(controller.scrollbackLines, 250_000)
     }
 
+    func testTerminalFontOptionsAndSizeBounds() {
+        XCTAssertEqual(
+            TerminalFontFamily.allCases.map(\.rawValue),
+            [
+                "DejaVu Sans Mono",
+                "PT Mono",
+                "Source Code Pro Medium",
+                "Ubuntu Mono",
+                "Courier New",
+                "Cascadia Code",
+                "Fira Code",
+                "JetBrains Mono",
+                "Meslo"
+            ]
+        )
+        XCTAssertEqual(TerminalFontSizeSettings.normalized(4), 8)
+        XCTAssertEqual(TerminalFontSizeSettings.normalized(18), 18)
+        XCTAssertEqual(TerminalFontSizeSettings.normalized(40), 32)
+    }
+
+    func testTmuxQuickLaunchEnablesMouseOnlyForItsSession() {
+        let command = TerminalMultiplexer.tmux.startupCommand(
+            sessionName: "review"
+        )
+
+        XCTAssertTrue(command.contains("tmux set-option -t 'review' mouse on"))
+        XCTAssertFalse(command.contains("set-option -g"))
+        XCTAssertTrue(command.contains("exec tmux attach-session -t 'review'"))
+    }
+
+    func testRemoteMultiplexerSessionListingParsesTmuxAndZellij() {
+        let sessions = RemoteMultiplexerSessionService.parse(
+            """
+            __SHELLHARBOR_TMUX__\twork
+            __SHELLHARBOR_ZELLIJ__\tdev
+            __SHELLHARBOR_TMUX__\twork
+            unrelated output
+            """
+        )
+
+        XCTAssertEqual(
+            sessions,
+            [
+                RemoteMultiplexerSession(multiplexer: .tmux, name: "work"),
+                RemoteMultiplexerSession(multiplexer: .zellij, name: "dev")
+            ]
+        )
+    }
+
+    @MainActor
+    func testTmuxQuickLaunchCommandIsNotInjectedOnReconnect() {
+        let profile = SessionProfile.local(id: UUID(), shell: .zsh)
+        let workspace = SessionWorkspace(
+            profile: profile,
+            multiplexer: .tmux
+        )
+
+        XCTAssertNotNil(workspace.consumeMultiplexerStartupCommand())
+        XCTAssertNil(workspace.consumeMultiplexerStartupCommand())
+    }
+
     @MainActor
     func testRepeatedTerminalInsertFallbackRequestsStayDistinct() {
         let profile = SessionProfile.local(
@@ -680,13 +796,21 @@ final class SSHCommandBuilderTests: XCTestCase {
         profile.proxyType = .tailscale
         profile.tailscaleAuthKey = "test-auth-key"
         profile.tailscaleMoshPortRange = "60020:60029"
+        profile.tailscaleMoshClientPath = "/tmp/tailscale-proxy-helper"
+        profile.tailscaleMoshControlPort = 15_041
 
         let invocation = try SSHCommandBuilder.mosh(profile: profile)
         let command = invocation.arguments.joined(separator: " ")
 
         XCTAssertTrue(command.contains("--port=60020:60029"))
+        XCTAssertTrue(command.contains("--client=/tmp/tailscale-proxy-helper"))
+        XCTAssertEqual(
+            invocation.environment["SHELLHARBOR_HELPER_MODE"],
+            "mosh-client"
+        )
         XCTAssertTrue(command.contains("MOSH IP 127.0.0.1"))
         XCTAssertTrue(command.contains("exec mosh-server"))
+        XCTAssertFalse(command.contains("--experimental-remote-ip=remote"))
     }
 
     func testSavedProxyCanBeReusedByAnotherRemote() {
@@ -1084,6 +1208,43 @@ final class SSHCommandBuilderTests: XCTestCase {
         XCTAssertTrue(commandLine.contains("/var/mobile/Documents"))
     }
 
+    func testMoshUsesConfiguredUDPPortRange() throws {
+        var profile = SessionProfile()
+        profile.host = "example.com"
+        profile.username = "alice"
+        profile.terminalConnectionMethod = .mosh
+        profile.moshCommand = "mosh"
+        profile.moshUDPPort = "60000:61000"
+
+        let invocation = try SSHCommandBuilder.mosh(profile: profile)
+        XCTAssertTrue(
+            invocation.arguments.joined(separator: " ")
+                .contains("--port=60000:61000")
+        )
+    }
+
+    func testJumpMoshUsesConfiguredUDPPort() throws {
+        var target = SessionProfile()
+        target.host = "target.example.com"
+        target.username = "alice"
+        target.terminalConnectionMethod = .jumpMosh
+        target.jumpRemoteID = UUID()
+        target.moshUDPPort = "60001"
+
+        var jump = SessionProfile()
+        jump.host = "jump.example.com"
+        jump.username = "bob"
+
+        let invocation = try SSHCommandBuilder.mosh(
+            profile: target,
+            jumpProfile: jump
+        )
+        XCTAssertTrue(
+            invocation.arguments.joined(separator: " ")
+                .contains("--port=60001")
+        )
+    }
+
     func testMoshPasswordIsPassedOnlyThroughEnvironment() throws {
         guard SSHCommandBuilder.sshpassPath() != nil else {
             throw XCTSkip("当前环境未安装 sshpass")
@@ -1243,6 +1404,20 @@ final class SSHCommandBuilderTests: XCTestCase {
             try PasswordCipher.decrypt(
                 ciphertext,
                 using: privateKey
+            ),
+            plaintext
+        )
+        var keyExportError: Unmanaged<CFError>?
+        let privateKeyData = try XCTUnwrap(
+            SecKeyCopyExternalRepresentation(
+                privateKey,
+                &keyExportError
+            ) as Data?
+        )
+        XCTAssertEqual(
+            try SHPasswordCipher.decrypt(
+                ciphertext,
+                privateKeyData: privateKeyData
             ),
             plaintext
         )
@@ -1449,6 +1624,21 @@ final class SSHCommandBuilderTests: XCTestCase {
         XCTAssertFalse(rendered.contains("vim-screen"))
     }
 
+    func testZshAutosuggestionReturnsCursorToTypedPrefix() {
+        let terminal = HeadlessTerminal { _ in }
+        terminal.terminal.feed(text: String(repeating: " ", count: 28))
+        terminal.terminal.feed(text: "./\u{8}\u{8}")
+        terminal.terminal.feed(
+            text: "\u{1B}[32m.\u{1B}[32m/\u{1B}[39m" +
+                "\u{1B}[38mbuild/fprpc /private/var/folders/2b/" +
+                "kgs86x9j24b8\u{1B}[39m>\r" +
+                String(repeating: " ", count: 28) +
+                "\u{1B}[32m.\u{1B}[32m/\u{1B}[39m"
+        )
+
+        XCTAssertEqual(terminal.terminal.getCursorLocation().x, 30)
+    }
+
     @MainActor
     func testLocalTerminalClearPreservesCurrentLineAndCursor() {
         let view = SteadyCursorTerminalView(frame: .zero)
@@ -1603,6 +1793,25 @@ final class SSHCommandBuilderTests: XCTestCase {
     }
 
     @MainActor
+    func testRetainedTerminalIgnoresTransientLayoutCollapse() {
+        let terminal = SteadyCursorTerminalView(frame: .init(
+            x: 0,
+            y: 0,
+            width: 800,
+            height: 500
+        ))
+        let originalSize = terminal.frame.size
+        let originalColumns = terminal.getTerminal().cols
+        let originalRows = terminal.getTerminal().rows
+
+        terminal.setFrameSize(.init(width: 8, height: 500))
+
+        XCTAssertEqual(terminal.frame.size, originalSize)
+        XCTAssertEqual(terminal.getTerminal().cols, originalColumns)
+        XCTAssertEqual(terminal.getTerminal().rows, originalRows)
+    }
+
+    @MainActor
     func testSessionWorkspacesKeepIndependentRightSideState() {
         var firstProfile = SessionProfile()
         firstProfile.id = UUID()
@@ -1668,6 +1877,24 @@ final class SSHCommandBuilderTests: XCTestCase {
     }
 
     @MainActor
+    func testWorkspaceFileServicesUseActualConnectionRouting() {
+        var configured = SessionProfile()
+        configured.proxyType = .tailscale
+        configured.proxyPort = 15_040
+        let workspace = SessionWorkspace(profile: configured)
+
+        var connected = configured
+        connected.proxyPort = 15_041
+        workspace.updateConnectionRouting(
+            profile: connected,
+            jumpProfile: nil
+        )
+
+        XCTAssertEqual(workspace.profile.resolvedProxyPort, 15_040)
+        XCTAssertEqual(workspace.connectionProfile.resolvedProxyPort, 15_041)
+    }
+
+    @MainActor
     func testWorkspaceRestoresPathsRememberedByRemote() {
         var profile = SessionProfile()
         profile.lastLocalPath = FileManager.default
@@ -1696,7 +1923,7 @@ final class SSHCommandBuilderTests: XCTestCase {
     func testWorkspaceModesUseRequestedOrderAndLabels() {
         XCTAssertEqual(
             WorkspaceMode.allCases.map(\.title),
-            ["终端", "文件", "工作台", "巡检日志"]
+            ["终端", "文件", "工作台", "巡检日志", "端口转发"]
         )
     }
 
@@ -2244,14 +2471,50 @@ final class SSHCommandBuilderTests: XCTestCase {
         XCTAssertTrue(profile.isLocalConnection)
         XCTAssertTrue(profile.isConnectable)
         XCTAssertEqual(profile.subtitle, "\(NSUserName()) · zsh")
-        XCTAssertEqual(invocation.executableURL.path, "/bin/zsh")
-        XCTAssertEqual(invocation.arguments, ["-l"])
+        XCTAssertEqual(invocation.executableURL.path, "/usr/bin/env")
+        XCTAssertEqual(
+            invocation.arguments,
+            [
+                "-C",
+                FileManager.default.homeDirectoryForCurrentUser.path,
+                "/bin/zsh",
+                "-l"
+            ]
+        )
         XCTAssertEqual(
             invocation.currentDirectory,
             FileManager.default.homeDirectoryForCurrentUser.path
         )
         XCTAssertFalse(
             invocation.executableURL.lastPathComponent.contains("ssh")
+        )
+
+        let tildeInvocation = SSHCommandBuilder.localShell(
+            .bash,
+            startingDirectory: "~"
+        )
+        XCTAssertEqual(
+            tildeInvocation.currentDirectory,
+            FileManager.default.homeDirectoryForCurrentUser.path
+        )
+    }
+
+    @MainActor
+    func testLocalConnectionStartDirectoryOverridesRestoredDirectory() {
+        let controller = TerminalController()
+        controller.prepareRestoration(
+            buffer: Data(),
+            pendingCommand: nil,
+            directory: "/"
+        )
+        var profile = SessionProfile.local(id: UUID(), shell: .bash)
+        profile.remoteStartPath = "~"
+
+        controller.connect(profile: profile)
+
+        XCTAssertEqual(
+            controller.invocation?.currentDirectory,
+            FileManager.default.homeDirectoryForCurrentUser.path
         )
     }
 
@@ -2290,6 +2553,53 @@ final class SSHCommandBuilderTests: XCTestCase {
         first.rename(to: "   ")
         XCTAssertEqual(first.sessionLabel, "1")
         XCTAssertEqual(first.displayName, "production · 1")
+    }
+
+    func testPortableRemoteNewFieldsRemainBackwardCompatible() throws {
+        let id = UUID()
+        let legacy = """
+        {
+          "id": "\(id.uuidString)",
+          "name": "legacy",
+          "host": "example.com",
+          "port": 22,
+          "username": "alice",
+          "authentication": "agent",
+          "hostKeyPolicy": "ask",
+          "keepAliveSeconds": 30,
+          "accentHex": "#4F8CFF",
+          "connectionMethod": "ssh"
+        }
+        """
+        var decoded = try JSONDecoder().decode(
+            PortableRemote.self,
+            from: Data(legacy.utf8)
+        )
+        XCTAssertNil(decoded.moshUDPPort)
+        XCTAssertNil(decoded.inspectionEnabled)
+        XCTAssertNil(decoded.inspectionIntervalMinutes)
+
+        decoded.moshUDPPort = "60000:61000"
+        decoded.sshJumpMode = "forward"
+        decoded.moshCommand = "/opt/homebrew/bin/mosh"
+        decoded.jumpMoshCommand = "/usr/local/bin/mosh"
+        decoded.jumpMoshServerCommand = "/usr/local/bin/mosh-server"
+        decoded.inspectionEnabled = false
+        decoded.inspectionIntervalMinutes = 45
+        let roundTrip = try JSONDecoder().decode(
+            PortableRemote.self,
+            from: JSONEncoder().encode(decoded)
+        )
+        XCTAssertEqual(roundTrip.moshUDPPort, "60000:61000")
+        XCTAssertEqual(roundTrip.sshJumpMode, "forward")
+        XCTAssertEqual(roundTrip.moshCommand, "/opt/homebrew/bin/mosh")
+        XCTAssertEqual(roundTrip.jumpMoshCommand, "/usr/local/bin/mosh")
+        XCTAssertEqual(
+            roundTrip.jumpMoshServerCommand,
+            "/usr/local/bin/mosh-server"
+        )
+        XCTAssertEqual(roundTrip.inspectionEnabled, false)
+        XCTAssertEqual(roundTrip.inspectionIntervalMinutes, 45)
     }
 
     @MainActor

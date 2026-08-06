@@ -12,15 +12,13 @@ let package = Package(
         .executable(name: "shcli", targets: ["ShellHarborCLI"])
     ],
     dependencies: [
-        .package(
-            url: "https://github.com/migueldeicaza/SwiftTerm.git",
-            exact: "1.15.0"
-        )
+        .package(path: "Vendor/SwiftTerm")
     ],
     targets: [
         .executableTarget(
             name: "ShellHarbor",
             dependencies: [
+                "ShellHarborCLIKit",
                 .product(name: "SwiftTerm", package: "SwiftTerm")
             ],
             path: "Sources/ShellHarbor"

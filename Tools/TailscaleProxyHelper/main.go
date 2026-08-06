@@ -14,7 +14,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -41,7 +40,7 @@ type udpRelayResponse struct {
 }
 
 func main() {
-	if filepath.Base(os.Args[0]) == "tailscale-mosh-client" {
+	if os.Getenv("SHELLHARBOR_HELPER_MODE") == "mosh-client" {
 		runMoshClientProxy()
 		return
 	}

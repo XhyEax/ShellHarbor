@@ -139,21 +139,22 @@
 				};
 			};
 			buildConfigurationList = A10000000000000000000008 /* Build configuration list for PBXProject "ShellHarborIOS" */;
-			developmentRegion = en;
+			developmentRegion = "zh-Hans";
 			hasScannedForEncodings = 0;
 			knownRegions = (
+				"zh-Hans",
 				en,
 				Base,
 			);
 			mainGroup = A10000000000000000000003;
 			packageReferences = (
-				A20000000000000000000003 /* XCRemoteSwiftPackageReference "SwiftTerm" */,
-				A20000000000000000000004 /* XCRemoteSwiftPackageReference "Citadel" */,
+				A20000000000000000000003 /* XCLocalSwiftPackageReference "Vendor/SwiftTerm" */,
+				A20000000000000000000004 /* XCLocalSwiftPackageReference "Vendor/Citadel" */,
 				A20000000000000000000007 /* XCRemoteSwiftPackageReference "swift-log" */,
 				A20000000000000000000008 /* XCRemoteSwiftPackageReference "swift-collections" */,
 				A20000000000000000000009 /* XCRemoteSwiftPackageReference "swift-nio" */,
 				A2000000000000000000000F /* XCLocalSwiftPackageReference "Vendor/swift-nio-ssh" */,
-				A20000000000000000000011 /* XCRemoteSwiftPackageReference "swift-crypto" */,
+				A20000000000000000000011 /* XCLocalSwiftPackageReference "Vendor/swift-crypto" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = A10000000000000000000004 /* Products */;
@@ -223,6 +224,8 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = ShellHarbor;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
+				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
+				INFOPLIST_KEY_UIFileSharingEnabled = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -257,6 +260,8 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = ShellHarbor;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
+				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
+				INFOPLIST_KEY_UIFileSharingEnabled = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -308,25 +313,21 @@
 			isa = XCLocalSwiftPackageReference;
 			relativePath = "Vendor/swift-nio-ssh";
 		};
+		A20000000000000000000004 /* XCLocalSwiftPackageReference "Vendor/Citadel" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = "Vendor/Citadel";
+		};
+		A20000000000000000000011 /* XCLocalSwiftPackageReference "Vendor/swift-crypto" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = "Vendor/swift-crypto";
+		};
+		A20000000000000000000003 /* XCLocalSwiftPackageReference "Vendor/SwiftTerm" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = "Vendor/SwiftTerm";
+		};
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCRemoteSwiftPackageReference section */
-		A20000000000000000000003 /* XCRemoteSwiftPackageReference "SwiftTerm" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/migueldeicaza/SwiftTerm.git";
-			requirement = {
-				kind = exactVersion;
-				version = 1.11.2;
-			};
-		};
-		A20000000000000000000004 /* XCRemoteSwiftPackageReference "Citadel" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/orlandos-nl/Citadel.git";
-			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 0.9.2;
-			};
-		};
 		A20000000000000000000007 /* XCRemoteSwiftPackageReference "swift-log" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/apple/swift-log.git";
@@ -351,25 +352,17 @@
 				version = 2.81.0;
 			};
 		};
-		A20000000000000000000011 /* XCRemoteSwiftPackageReference "swift-crypto" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/apple/swift-crypto.git";
-			requirement = {
-				kind = exactVersion;
-				version = 3.15.1;
-			};
-		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
 		A20000000000000000000005 /* SwiftTerm */ = {
 			isa = XCSwiftPackageProductDependency;
-			package = A20000000000000000000003 /* XCRemoteSwiftPackageReference "SwiftTerm" */;
+			package = A20000000000000000000003 /* XCLocalSwiftPackageReference "Vendor/SwiftTerm" */;
 			productName = SwiftTerm;
 		};
 		A20000000000000000000006 /* Citadel */ = {
 			isa = XCSwiftPackageProductDependency;
-			package = A20000000000000000000004 /* XCRemoteSwiftPackageReference "Citadel" */;
+			package = A20000000000000000000004 /* XCLocalSwiftPackageReference "Vendor/Citadel" */;
 			productName = Citadel;
 		};
 		A2000000000000000000000D /* NIOCore */ = {
@@ -384,12 +377,12 @@
 		};
 		A20000000000000000000010 /* Crypto */ = {
 			isa = XCSwiftPackageProductDependency;
-			package = A20000000000000000000011 /* XCRemoteSwiftPackageReference "swift-crypto" */;
+			package = A20000000000000000000011 /* XCLocalSwiftPackageReference "Vendor/swift-crypto" */;
 			productName = Crypto;
 		};
 		A20000000000000000000013 /* _CryptoExtras */ = {
 			isa = XCSwiftPackageProductDependency;
-			package = A20000000000000000000011 /* XCRemoteSwiftPackageReference "swift-crypto" */;
+			package = A20000000000000000000011 /* XCLocalSwiftPackageReference "Vendor/swift-crypto" */;
 			productName = _CryptoExtras;
 		};
 /* End XCSwiftPackageProductDependency section */

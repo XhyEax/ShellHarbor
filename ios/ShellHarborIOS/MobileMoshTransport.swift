@@ -82,7 +82,13 @@ final class MobileMoshTransport: @unchecked Sendable {
             host.withCString { hostPointer in
                 port.withCString { portPointer in
                     key.withCString { keyPointer in
-                        "adaptive".withCString { predictionPointer in
+                        // Mosh's speculative overlay uses terminal attributes
+                        // that the iOS SwiftTerm renderer does not reproduce
+                        // reliably; predicted glyphs can appear as blank
+                        // cells until the server acknowledges them. Disable
+                        // prediction so every visible character is confirmed
+                        // remote output.
+                        "never".withCString { predictionPointer in
                             "no".withCString { overwritePointer in
                                 restoredState.withUnsafeBytes { stateBytes in
                                     mosh_main(

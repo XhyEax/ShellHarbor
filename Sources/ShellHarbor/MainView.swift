@@ -268,8 +268,21 @@ private struct WorkspaceHost: View {
                 Divider()
             }
 
-            if let workspace = state.selectedWorkspace {
-                SessionDetail(workspace: workspace)
+            if !state.activeWorkspaces.isEmpty {
+                ZStack {
+                    ForEach(state.activeWorkspaces) { workspace in
+                        let isSelected =
+                            workspace.id == state.selectedWorkspaceID
+                        SessionDetail(
+                            workspace: workspace,
+                            isSelected: isSelected
+                        )
+                            .opacity(isSelected ? 1 : 0)
+                            .allowsHitTesting(isSelected)
+                            .accessibilityHidden(!isSelected)
+                            .zIndex(isSelected ? 1 : 0)
+                    }
+                }
             } else {
                 EmptyWorkspaceView()
             }
@@ -562,6 +575,7 @@ private struct ActiveSessionTab: View {
 private struct SessionDetail: View {
     @EnvironmentObject private var state: AppState
     @ObservedObject var workspace: SessionWorkspace
+    let isSelected: Bool
 
     var body: some View {
         VStack(spacing: 0) {
@@ -572,7 +586,8 @@ private struct SessionDetail: View {
             Divider()
             WorkspaceContent(
                 workspace: workspace,
-                mode: workspace.mode
+                mode: workspace.mode,
+                isSelected: isSelected
             )
         }
         .onAppear {
@@ -1255,10 +1270,29 @@ private struct SessionRow: View {
                 Text(session.name)
                     .font(.body.weight(.medium))
                     .lineLimit(1)
-                Text(session.subtitle)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                HStack(spacing: 5) {
+                    Text(session.subtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                    Text(session.resolvedTerminalConnectionMethod.title)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(
+                            Color.secondary.opacity(0.08),
+                            in: Capsule()
+                        )
+                        .overlay {
+                            Capsule()
+                                .stroke(
+                                    Color.secondary.opacity(0.25),
+                                    lineWidth: 1
+                                )
+                        }
+                        .fixedSize()
+                }
             }
             Spacer(minLength: 6)
             if session.jumpRemoteID != nil {
@@ -1441,6 +1475,28 @@ private struct ConnectionBar: View {
             .disabled(!workspace.profile.isConnectable)
 
             Menu {
+                let existing = state.remoteMultiplexerSessions[
+                    workspace.remoteID
+                ] ?? []
+                if !existing.isEmpty {
+                    Section("已有会话") {
+                        ForEach(existing) { session in
+                            Button {
+                                state.launchMultiplexer(
+                                    session.multiplexer,
+                                    for: workspace.remoteID,
+                                    sessionName: session.name
+                                )
+                            } label: {
+                                Label(
+                                    "\(session.multiplexer.rawValue) · \(session.name)",
+                                    systemImage: "rectangle.on.rectangle"
+                                )
+                            }
+                        }
+                    }
+                    Divider()
+                }
                 Button("新建 tmux Session") {
                     state.launchMultiplexer(
                         .tmux,
@@ -1453,6 +1509,24 @@ private struct ConnectionBar: View {
                         for: workspace.remoteID
                     )
                 }
+                Divider()
+                Button {
+                    state.refreshMultiplexerSessions(
+                        for: workspace.remoteID
+                    )
+                } label: {
+                    Label(
+                        state.loadingMultiplexerRemoteIDs.contains(
+                            workspace.remoteID
+                        ) ? "正在识别…" : "刷新已有会话",
+                        systemImage: "arrow.clockwise"
+                    )
+                }
+                .disabled(
+                    state.loadingMultiplexerRemoteIDs.contains(
+                        workspace.remoteID
+                    )
+                )
             } label: {
                 Label("快速启动", systemImage: "bolt.fill")
             }
@@ -1460,6 +1534,9 @@ private struct ConnectionBar: View {
                 workspace.profile.isLocalConnection ||
                     !workspace.profile.isConnectable
             )
+            .task(id: workspace.remoteID) {
+                state.refreshMultiplexerSessions(for: workspace.remoteID)
+            }
 
             Button {
                 state.reconnect()
@@ -1490,6 +1567,7 @@ private struct ConnectionBar: View {
 private struct WorkspaceContent: View {
     @ObservedObject var workspace: SessionWorkspace
     let mode: WorkspaceMode
+    let isSelected: Bool
 
     var body: some View {
         GeometryReader { geometry in
@@ -1497,35 +1575,41 @@ private struct WorkspaceContent: View {
             let contentHeight = max(0, geometry.size.height - dividerHeight)
             let terminalHeight: CGFloat = switch mode {
             case .workspace: contentHeight * 0.46
-            case .terminal: contentHeight
-            case .files, .inspection: 0
+            case .terminal, .files, .inspection, .forwarding: contentHeight
             }
             let filesHeight: CGFloat = switch mode {
             case .workspace: max(0, contentHeight - terminalHeight)
-            case .files: contentHeight
-            case .terminal, .inspection: 0
+            case .terminal, .files, .inspection, .forwarding: contentHeight
             }
-            let inspectionHeight = mode == .inspection
-                ? contentHeight
+            let filesOffset = mode == .workspace
+                ? terminalHeight + dividerHeight
                 : 0
 
-            VStack(spacing: 0) {
-                TerminalView(workspace: workspace)
+            ZStack(alignment: .top) {
+                TerminalView(
+                    workspace: workspace,
+                    isActive: isSelected && mode != .files &&
+                        mode != .inspection && mode != .forwarding
+                )
                     .frame(height: terminalHeight)
                     .opacity(
-                        mode == .files || mode == .inspection ? 0 : 1
+                        mode == .files || mode == .inspection ||
+                            mode == .forwarding ? 0 : 1
                     )
                     .allowsHitTesting(
-                        mode != .files && mode != .inspection
+                        mode != .files && mode != .inspection &&
+                            mode != .forwarding
                     )
                     .accessibilityHidden(
-                        mode == .files || mode == .inspection
+                        mode == .files || mode == .inspection ||
+                            mode == .forwarding
                     )
                     .clipped()
 
                 Divider()
                     .frame(height: dividerHeight)
                     .opacity(mode == .workspace ? 1 : 0)
+                    .offset(y: terminalHeight)
 
                 FileTransferView(
                     workspace: workspace,
@@ -1534,21 +1618,32 @@ private struct WorkspaceContent: View {
                 )
                     .frame(height: filesHeight)
                     .opacity(
-                        mode == .terminal || mode == .inspection ? 0 : 1
+                        mode == .terminal || mode == .inspection ||
+                            mode == .forwarding ? 0 : 1
                     )
                     .allowsHitTesting(
-                        mode != .terminal && mode != .inspection
+                        mode != .terminal && mode != .inspection &&
+                            mode != .forwarding
                     )
                     .accessibilityHidden(
-                        mode == .terminal || mode == .inspection
+                        mode == .terminal || mode == .inspection ||
+                            mode == .forwarding
                     )
+                    .offset(y: filesOffset)
                     .clipped()
 
                 InspectionLogView(workspace: workspace)
-                    .frame(height: inspectionHeight)
+                    .frame(height: contentHeight)
                     .opacity(mode == .inspection ? 1 : 0)
                     .allowsHitTesting(mode == .inspection)
                     .accessibilityHidden(mode != .inspection)
+                    .clipped()
+
+                PortForwardView(workspace: workspace)
+                    .frame(height: contentHeight)
+                    .opacity(mode == .forwarding ? 1 : 0)
+                    .allowsHitTesting(mode == .forwarding)
+                    .accessibilityHidden(mode != .forwarding)
                     .clipped()
             }
             .frame(width: geometry.size.width, height: geometry.size.height)
@@ -1627,9 +1722,9 @@ private struct LocalSettingsView: View {
                 .pickerStyle(.radioGroup)
 
                 LabeledContent("启动路径") {
-                    Text(state.localShell.resolvedPath)
+                    TextField("用户目录", text: $state.localStartPath)
                         .font(.system(.body, design: .monospaced))
-                        .textSelection(.enabled)
+                        .frame(minWidth: 260)
                 }
             }
             .formStyle(.grouped)

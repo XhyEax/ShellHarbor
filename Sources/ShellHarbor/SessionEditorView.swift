@@ -313,6 +313,14 @@ struct SessionEditorView: View {
                         )
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        TextField(
+                            "UDP 端口或范围",
+                            text: Binding(
+                                get: { draft.resolvedMoshUDPPort },
+                                set: { draft.moshUDPPort = $0 }
+                            ),
+                            prompt: Text("例如 60000 或 60000:61000")
+                        )
                     }
                 }
 

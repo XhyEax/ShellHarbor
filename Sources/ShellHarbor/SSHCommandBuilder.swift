@@ -73,6 +73,31 @@ enum CommandOutputSummary {
 }
 
 enum SSHCommandBuilder {
+    static func portForward(
+        profile: SessionProfile,
+        jumpProfile: SessionProfile? = nil,
+        rule: PortForwardRule
+    ) throws -> SSHInvocation {
+        var arguments = commonArguments(for: profile)
+        arguments += try routeArguments(
+            profile: profile,
+            jumpProfile: jumpProfile
+        )
+        arguments += [
+            "-N",
+            "-o", "ExitOnForwardFailure=yes",
+            rule.direction.sshFlag,
+            rule.sshSpecification
+        ]
+        arguments.append("\(profile.username)@\(profile.resolvedHost)")
+        return try wrapIfNeeded(
+            tool: "/usr/bin/ssh",
+            arguments: arguments,
+            profile: profile,
+            jumpProfile: jumpProfile
+        )
+    }
+
     static func sshpassPath(fileManager: FileManager = .default) -> String? {
         let candidates = [
             "/opt/homebrew/bin/sshpass",
@@ -144,9 +169,14 @@ enum SSHCommandBuilder {
             FileManager.default.fileExists(atPath: directory)
                 ? directory
                 : FileManager.default.homeDirectoryForCurrentUser.path
+        environment["PWD"] = usableDirectory
         return SSHInvocation(
-            executableURL: URL(fileURLWithPath: executable),
-            arguments: ["-l"],
+            // `env -C` changes directory in the child immediately before it
+            // execs the selected login shell. This avoids relying on
+            // forkpty's inherited cwd, which can remain the app's `/` even
+            // when the requested directory and PWD are correct.
+            executableURL: URL(fileURLWithPath: "/usr/bin/env"),
+            arguments: ["-C", usableDirectory, executable, "-l"],
             environment: environment,
             displayCommand: "\(shell.shellName) -l",
             currentDirectory: usableDirectory
@@ -191,6 +221,7 @@ enum SSHCommandBuilder {
             moshArguments.append("--client=\(clientPath)")
             environment["SHELLHARBOR_TAILSCALE_CONTROL_PORT"] = String(controlPort)
             environment["SHELLHARBOR_TAILSCALE_TARGET"] = profile.resolvedHost
+            environment["SHELLHARBOR_HELPER_MODE"] = "mosh-client"
         }
         if
             jumpProfile != nil ||
@@ -200,9 +231,15 @@ enum SSHCommandBuilder {
             // from its local SSH command. Ask the remote side to report the
             // address seen by SSH. This discovers an address; it does not
             // tunnel UDP through the proxy or jump host.
-            moshArguments.append(
-                "--experimental-remote-ip=remote"
-            )
+            // A managed Tailscale relay deliberately reports 127.0.0.1 to
+            // mosh-client. Remote-IP discovery would override that value with
+            // SSH_CONNECTION (the target's Tailscale address), bypassing the
+            // relay and making restored sessions contend for remote UDP ports.
+            if profile.tailscaleMoshPortRange == nil {
+                moshArguments.append(
+                    "--experimental-remote-ip=remote"
+                )
+            }
         }
         moshArguments.append("--ssh=\(sshBootstrap)")
         let serverCommand = profile.resolvedMoshServerCommand
@@ -214,8 +251,15 @@ enum SSHCommandBuilder {
             moshArguments.append(
                 "--server=printf '\\nMOSH IP 127.0.0.1\\n'; exec \(executable)"
             )
-        } else if !serverCommand.isEmpty {
-            moshArguments.append("--server=\(serverCommand)")
+        } else {
+            if !profile.resolvedMoshUDPPort.isEmpty {
+                moshArguments.append(
+                    "--port=\(profile.resolvedMoshUDPPort)"
+                )
+            }
+            if !serverCommand.isEmpty {
+                moshArguments.append("--server=\(serverCommand)")
+            }
         }
         moshArguments += [
             "--",
@@ -259,6 +303,11 @@ enum SSHCommandBuilder {
             "--experimental-remote-ip=remote",
             "--ssh=\(sshBootstrap)"
         ]
+        if !profile.resolvedMoshUDPPort.isEmpty {
+            moshArguments.append(
+                "--port=\(profile.resolvedMoshUDPPort)"
+            )
+        }
         if !profile.resolvedMoshServerCommand.isEmpty {
             moshArguments.append(
                 "--server=\(profile.resolvedMoshServerCommand)"

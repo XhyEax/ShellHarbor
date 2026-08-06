@@ -178,6 +178,58 @@ final class ShellHarborCLIKitTests: XCTestCase {
         XCTAssertEqual(remote.resolvedGroup, "未分组")
     }
 
+    func testSCPDetectsExistingSourceAsLocalUpload() throws {
+        let source = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        try Data("test".utf8).write(to: source)
+        defer { try? FileManager.default.removeItem(at: source) }
+
+        let transfer = SHSCPTransfer.detect(
+            from: source.path,
+            to: "~/incoming/file.txt"
+        )
+
+        XCTAssertEqual(transfer.direction, .upload)
+        XCTAssertEqual(transfer.localPath, source.path)
+        XCTAssertEqual(transfer.remotePath, "~/incoming/file.txt")
+    }
+
+    func testSCPDetectsMissingSourceAsRemoteDownload() {
+        let transfer = SHSCPTransfer.detect(
+            from: "/remote/missing/file.txt",
+            to: "~/Downloads"
+        )
+
+        XCTAssertEqual(transfer.direction, .download)
+        XCTAssertEqual(
+            transfer.localPath,
+            NSString(string: "~/Downloads").expandingTildeInPath
+        )
+        XCTAssertEqual(transfer.remotePath, "/remote/missing/file.txt")
+    }
+
+    func testSCPBuilderUsesRemoteProfileAndRecursiveTransfer() throws {
+        let remote = try profile(name: "Files", host: "example.com")
+        let invocation = try SHSSHCommandBuilder.buildSCP(
+            profile: remote,
+            jumpProfile: nil,
+            transfer: SHSCPTransfer(
+                localPath: "/tmp/report.txt",
+                remotePath: "~/reports/report.txt",
+                direction: .upload
+            ),
+            targetPasswordDescriptor: nil,
+            jumpPasswordDescriptor: nil
+        )
+
+        XCTAssertEqual(invocation.executablePath, "/usr/bin/scp")
+        XCTAssertTrue(invocation.arguments.contains("-r"))
+        XCTAssertEqual(
+            invocation.arguments.suffix(2),
+            ["/tmp/report.txt", "deploy@example.com:~/reports/report.txt"]
+        )
+    }
+
     private func profile(
         id: String = "11111111-1111-1111-1111-111111111111",
         name: String,

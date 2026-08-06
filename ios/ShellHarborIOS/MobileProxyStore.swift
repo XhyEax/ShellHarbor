@@ -3,7 +3,7 @@ import Observation
 
 struct MobileProxyProfile: Identifiable, Codable, Equatable, Sendable {
     var id = UUID()
-    var name = "新 Proxy"
+    var name = "Tailscale 官方服务"
     var type = MobileProxyType.tailscale
     var host = "127.0.0.1"
     var port = 1080
@@ -34,8 +34,45 @@ final class MobileProxyStore {
         persist()
     }
 
+    @discardableResult
+    func saveReusableProxy(from remote: MobileRemoteProfile) -> UUID? {
+        guard remote.proxyType != .none else { return nil }
+        let trimmedName = remote.proxyName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let fallbackName: String
+        if remote.proxyType == .tailscale {
+            let loginServerName = remote.tailscaleLoginServer
+                .replacingOccurrences(of: "https://", with: "")
+                .replacingOccurrences(of: "http://", with: "")
+                .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            fallbackName = loginServerName.isEmpty ? "Tailscale 官方服务" : loginServerName
+        } else {
+            fallbackName = remote.proxyHost
+        }
+        let name = trimmedName.isEmpty ? fallbackName : trimmedName
+        guard !name.isEmpty else { return nil }
+
+        var proxy = proxies.first(where: {
+            $0.type == remote.proxyType &&
+                $0.name.caseInsensitiveCompare(name) == .orderedSame
+        }) ?? MobileProxyProfile()
+        proxy.name = name
+        proxy.type = remote.proxyType
+        proxy.host = remote.proxyHost
+        proxy.port = remote.proxyPort
+        proxy.tailscaleLoginServer = remote.tailscaleLoginServer
+        proxy.tailscaleNodeName = remote.tailscaleNodeName
+        proxy.tailscaleAuthKey = remote.tailscaleAuthKey
+        save(proxy)
+        return proxy.id
+    }
+
     func delete(at offsets: IndexSet) {
-        for index in offsets.sorted(by: >) { proxies.remove(at: index) }
+        delete(ids: Set(offsets.compactMap { proxies.indices.contains($0) ? proxies[$0].id : nil }))
+    }
+
+    func delete(ids: Set<UUID>) {
+        guard !ids.isEmpty else { return }
+        proxies.removeAll { ids.contains($0.id) }
         persist()
     }
 
@@ -59,9 +96,10 @@ final class MobileProxyStore {
             let type = Self.proxyType(portable.type)
             let normalizedName = portable.name.trimmingCharacters(in: .whitespacesAndNewlines)
             let existing = proxies.first(where: {
-                $0.type == type && $0.name.caseInsensitiveCompare(normalizedName) == .orderedSame
+                $0.id == portable.id ||
+                    $0.name.caseInsensitiveCompare(normalizedName) == .orderedSame
             })
-            let finalID = existing?.id ?? (proxies.contains { $0.id == portable.id } ? UUID() : portable.id)
+            let finalID = existing?.id ?? portable.id
             idMap[portable.id] = finalID
             var proxy = existing ?? MobileProxyProfile()
             proxy.id = finalID

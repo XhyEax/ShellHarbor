@@ -45,9 +45,14 @@ func (p *Proxy) Start(stateDir, hostname, loginServer, authKey string) error {
 		Ephemeral:  false,
 		Logf:       func(string, ...any) {},
 	}
-	if _, err := server.Up(ctx); err != nil {
+	startupCtx, stopStartup := context.WithTimeout(ctx, 45*time.Second)
+	defer stopStartup()
+	if _, err := server.Up(startupCtx); err != nil {
 		cancel()
 		_ = server.Close()
+		if errors.Is(err, context.DeadlineExceeded) {
+			return errors.New("tailscale start timed out after 45 seconds")
+		}
 		return fmt.Errorf("tailscale start failed: %w", err)
 	}
 	p.server = server

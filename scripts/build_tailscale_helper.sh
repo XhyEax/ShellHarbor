@@ -15,4 +15,12 @@ else
 fi
 
 cd "$HELPER_SOURCE"
-"$GO_BINARY" build -trimpath -o "$OUTPUT_PATH" .
+# tsnet necessarily brings the Go runtime and userspace networking stack, but
+# release bundles do not need DWARF, the Go symbol table, or a build ID. Keeping
+# feature code intact avoids changing Headscale/Tailscale compatibility while
+# removing roughly one third of the helper's on-disk size.
+"$GO_BINARY" build \
+    -trimpath \
+    -ldflags="-s -w -buildid=" \
+    -o "$OUTPUT_PATH" \
+    .

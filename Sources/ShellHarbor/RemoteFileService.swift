@@ -32,7 +32,9 @@ enum RemoteFileService {
         let invocation = try SSHCommandBuilder.ssh(
             profile: profile,
             jumpProfile: jumpProfile,
-            command: script
+            command: script,
+            connectionTimeoutSeconds: 12,
+            batchMode: true
         )
         let result = try await CommandRunner.run(invocation)
         guard result.exitCode == 0 else {
@@ -122,7 +124,9 @@ enum RemoteFileService {
         let invocation = try SSHCommandBuilder.ssh(
             profile: profile,
             jumpProfile: jumpProfile,
-            command: command
+            command: command,
+            connectionTimeoutSeconds: 12,
+            batchMode: true
         )
         let result = try await CommandRunner.run(invocation)
         guard result.exitCode == 0 else {
@@ -139,7 +143,9 @@ enum RemoteFileService {
         let invocation = try SSHCommandBuilder.ssh(
             profile: profile,
             jumpProfile: jumpProfile,
-            command: command
+            command: command,
+            connectionTimeoutSeconds: 12,
+            batchMode: true
         )
         let result = try await CommandRunner.run(invocation)
         guard result.exitCode == 0 else {
@@ -194,7 +200,9 @@ enum RemoteFileService {
         let invocation = try SSHCommandBuilder.ssh(
             profile: profile,
             jumpProfile: jumpProfile,
-            command: command
+            command: command,
+            connectionTimeoutSeconds: 12,
+            batchMode: true
         )
         let result = try await CommandRunner.run(invocation)
         guard result.exitCode == 0 else {
@@ -222,7 +230,9 @@ enum RemoteFileService {
         let invocation = try SSHCommandBuilder.ssh(
             profile: profile,
             jumpProfile: jumpProfile,
-            command: command
+            command: command,
+            connectionTimeoutSeconds: 12,
+            batchMode: true
         )
         let result = try await CommandRunner.run(invocation)
         guard result.exitCode == 0 else {

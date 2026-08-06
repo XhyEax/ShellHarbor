@@ -14,6 +14,7 @@ struct PortableRemote: Codable {
     var host: String
     var port: Int
     var username: String
+    var remoteStartPath: String?
     var authentication: String
     var hostKeyPolicy: String
     var keepAliveSeconds: Int
@@ -32,6 +33,10 @@ struct PortableRemote: Codable {
     var moshCommand: String?
     var moshServerCommand: String?
     var jumpMoshCommand: String?
+    var jumpMoshServerCommand: String? = nil
+    var moshUDPPort: String? = nil
+    var inspectionEnabled: Bool? = nil
+    var inspectionIntervalMinutes: Int? = nil
 }
 
 struct PortableProxy: Codable {
@@ -79,6 +84,7 @@ extension AppState {
                     host: profile.resolvedHost,
                     port: profile.port,
                     username: profile.username,
+                    remoteStartPath: profile.remoteStartPath.isEmpty ? nil : profile.remoteStartPath,
                     authentication: profile.authentication.rawValue,
                     hostKeyPolicy: profile.hostKeyPolicy.rawValue,
                     keepAliveSeconds: profile.keepAliveSeconds,
@@ -96,7 +102,11 @@ extension AppState {
                     tailscaleHostname: profile.tailscaleHostname,
                     moshCommand: profile.moshCommand,
                     moshServerCommand: profile.moshServerCommand,
-                    jumpMoshCommand: profile.jumpMoshCommand
+                    jumpMoshCommand: profile.jumpMoshCommand,
+                    jumpMoshServerCommand: profile.jumpMoshServerCommand,
+                    moshUDPPort: profile.moshUDPPort,
+                    inspectionEnabled: profile.resolvedInspectionEnabled,
+                    inspectionIntervalMinutes: profile.resolvedInspectionIntervalMinutes
                 )
             },
             proxies: savedProxies.map {
@@ -164,6 +174,7 @@ extension AppState {
             profile.host = remote.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "127.0.0.1" : remote.host
             profile.port = remote.port
             profile.username = remote.username
+            profile.remoteStartPath = remote.remoteStartPath ?? ""
             profile.authentication = AuthenticationMethod(rawValue: remote.authentication) ?? .agent
             profile.hostKeyPolicy = HostKeyPolicy(rawValue: remote.hostKeyPolicy) ?? .ask
             profile.keepAliveSeconds = remote.keepAliveSeconds
@@ -182,6 +193,14 @@ extension AppState {
             profile.moshCommand = remote.moshCommand
             profile.moshServerCommand = remote.moshServerCommand
             profile.jumpMoshCommand = remote.jumpMoshCommand
+            profile.jumpMoshServerCommand = remote.jumpMoshServerCommand
+            profile.moshUDPPort = remote.moshUDPPort
+            if let inspectionEnabled = remote.inspectionEnabled {
+                profile.inspectionEnabled = inspectionEnabled
+            }
+            if let interval = remote.inspectionIntervalMinutes {
+                profile.inspectionIntervalMinutes = max(1, interval)
+            }
             if let index = sessions.firstIndex(where: { $0.id == finalID }) {
                 sessions[index] = profile
                 updated += 1

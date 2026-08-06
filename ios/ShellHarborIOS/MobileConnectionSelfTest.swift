@@ -81,9 +81,9 @@ enum MobileConnectionSelfTest {
             let jump = profile.jumpRemoteID.flatMap { byID[$0] }
             let controller = MobileSSHController(
                 remote: profile,
-                identityURL: profile.authentication == .privateKey ? identityURL : nil,
+                identityURL: profile.authentication == .password ? nil : identityURL,
                 jumpRemote: jump,
-                jumpIdentityURL: jump?.authentication == .privateKey ? identityURL : nil,
+                jumpIdentityURL: jump?.authentication == .password ? nil : identityURL,
                 trustedHostKey: nil,
                 trustedJumpHostKey: nil,
                 trustHostKey: { _ in },

@@ -2,11 +2,13 @@ import SwiftUI
 
 struct TerminalView: View {
     @ObservedObject var workspace: SessionWorkspace
+    let isActive: Bool
 
     var body: some View {
         TerminalPanel(
             workspace: workspace,
-            controller: workspace.terminal
+            controller: workspace.terminal,
+            isActive: isActive
         )
     }
 }
@@ -15,6 +17,7 @@ private struct TerminalPanel: View {
     @EnvironmentObject private var state: AppState
     @ObservedObject var workspace: SessionWorkspace
     @ObservedObject var controller: TerminalController
+    let isActive: Bool
     @State private var isRemoteFileDropTarget = false
     @State private var showingTerminalSettings = false
 
@@ -77,6 +80,8 @@ private struct TerminalPanel: View {
                 ) {
                     TerminalSettingsPopover(
                         theme: $state.terminalTheme,
+                        fontFamily: $state.terminalFont,
+                        fontSize: $state.terminalFontSize,
                         scrollbackLines: $state.terminalScrollbackLines
                     )
                 }
@@ -105,12 +110,16 @@ private struct TerminalPanel: View {
 
             ZStack {
                 Color(nsColor: state.terminalTheme.backgroundColor)
-                if controller.invocation != nil {
+                if controller.invocation != nil ||
+                    controller.hasRetainedTerminalView {
                     InteractiveTerminalRepresentable(
                         controller: controller,
                         connectionToken: controller.connectionToken,
                         invocation: controller.invocation,
-                        theme: state.terminalTheme
+                        theme: state.terminalTheme,
+                        fontFamily: state.terminalFont,
+                        fontSize: state.terminalFontSize,
+                        isActive: isActive
                     )
                     .id(controller.connectionToken)
                 } else {
@@ -124,6 +133,9 @@ private struct TerminalPanel: View {
                             .multilineTextAlignment(.center)
                     }
                     .padding()
+                }
+                if case let .failed(message) = controller.state {
+                    connectionFailureOverlay(message: message)
                 }
             }
             .dropDestination(
@@ -176,10 +188,39 @@ private struct TerminalPanel: View {
         }
         return "交互式终端已就绪\n点击“重连”后可直接键入，支持方向键、Tab、vim 与 top"
     }
+
+    private func connectionFailureOverlay(message: String) -> some View {
+        VStack(spacing: 12) {
+            Text(message)
+                .font(.callout)
+                .multilineTextAlignment(.center)
+                .textSelection(.enabled)
+            HStack(spacing: 10) {
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(message, forType: .string)
+                } label: {
+                    Label("复制", systemImage: "doc.on.doc")
+                }
+                Button {
+                    state.reconnect(workspace)
+                } label: {
+                    Label("重新连接", systemImage: "arrow.clockwise")
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding()
+        .frame(maxWidth: 520)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .padding()
+    }
 }
 
 private struct TerminalSettingsPopover: View {
     @Binding var theme: TerminalTheme
+    @Binding var fontFamily: TerminalFontFamily
+    @Binding var fontSize: Double
     @Binding var scrollbackLines: Int
     @State private var customLines: String
 
@@ -194,9 +235,13 @@ private struct TerminalSettingsPopover: View {
 
     init(
         theme: Binding<TerminalTheme>,
+        fontFamily: Binding<TerminalFontFamily>,
+        fontSize: Binding<Double>,
         scrollbackLines: Binding<Int>
     ) {
         _theme = theme
+        _fontFamily = fontFamily
+        _fontSize = fontSize
         _scrollbackLines = scrollbackLines
         _customLines = State(
             initialValue: String(scrollbackLines.wrappedValue)
@@ -213,6 +258,20 @@ private struct TerminalSettingsPopover: View {
                     Text(theme.title).tag(theme)
                 }
             }
+
+            Picker("字体", selection: $fontFamily) {
+                ForEach(TerminalFontFamily.allCases) { family in
+                    Text(family.rawValue).tag(family)
+                }
+            }
+
+            Stepper(value: $fontSize, in: 8...32, step: 1) {
+                LabeledContent("字体大小", value: "\(Int(fontSize)) pt")
+            }
+
+            Text("未安装的字体会回退为系统等宽字体。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
 
             Divider()
 

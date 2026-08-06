@@ -1,6 +1,7 @@
 import CryptoKit
 import Foundation
 import Security
+import ShellHarborCLIKit
 
 enum PasswordCipherError: Error {
     case invalidCiphertext
@@ -51,8 +52,7 @@ enum PasswordCipher {
     }
 
     static func decrypt(_ ciphertext: String) throws -> String {
-        let (privateKey, _) = try loadOrCreateKeyPair()
-        return try decrypt(ciphertext, using: privateKey)
+        try SHPasswordCipher.decrypt(ciphertext)
     }
 
     static func encrypt(

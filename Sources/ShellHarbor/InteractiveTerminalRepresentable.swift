@@ -61,6 +61,9 @@ struct InteractiveTerminalRepresentable: NSViewRepresentable {
     let connectionToken: UUID
     let invocation: SSHInvocation?
     let theme: TerminalTheme
+    let fontFamily: TerminalFontFamily
+    let fontSize: Double
+    let isActive: Bool
 
     func makeCoordinator() -> Coordinator {
         Coordinator(controller: controller, connectionToken: connectionToken)
@@ -74,21 +77,26 @@ struct InteractiveTerminalRepresentable: NSViewRepresentable {
             view = SteadyCursorTerminalView(frame: .zero)
             view.optionAsMetaKey = true
             view.allowMouseReporting = true
+            view.scrollerStyle = .legacy
+            view.scrollerControlSize = .small
+            view.scrollerKnobStyle = .light
             view.getTerminal().setCursorStyle(.steadyBlock)
             view.getTerminal().changeScrollback(
                 controller.scrollbackLines
             )
             controller.retainTerminalView(view)
         }
+        view.scrollerStyle = .legacy
+        view.scrollerControlSize = .small
+        view.scrollerKnobStyle = .light
         (view as? SteadyCursorTerminalView)?.restorationController =
             controller
+        (view as? SteadyCursorTerminalView)?.configureScrollerAutoHide()
         // Match the system wcwidth behavior used by tmux/screen. SwiftTerm's
         // wide default can move its cursor two cells while the remote PTY
         // moves one, which makes text appear out of order after Mosh redraws.
         view.getTerminal().options.regionalIndicatorWidth = .narrow
-        view.font =
-            NSFont(name: "NotoMonoForPowerline", size: 16) ??
-            NSFont.monospacedSystemFont(ofSize: 16, weight: .regular)
+        applyFont(fontFamily, size: fontSize, to: view)
         view.processDelegate = controller.processDelegate
         applyTheme(theme, to: view)
         context.coordinator.terminalView = view
@@ -96,11 +104,11 @@ struct InteractiveTerminalRepresentable: NSViewRepresentable {
             view: view,
             connectionToken: connectionToken,
             invocation: invocation,
-            theme: theme
+            theme: theme,
+            fontFamily: fontFamily,
+            fontSize: fontSize,
+            isActive: isActive
         )
-        DispatchQueue.main.async {
-            view.window?.makeFirstResponder(view)
-        }
         return view
     }
 
@@ -110,7 +118,10 @@ struct InteractiveTerminalRepresentable: NSViewRepresentable {
             view: view,
             connectionToken: connectionToken,
             invocation: invocation,
-            theme: theme
+            theme: theme,
+            fontFamily: fontFamily,
+            fontSize: fontSize,
+            isActive: isActive
         )
     }
 
@@ -136,6 +147,9 @@ struct InteractiveTerminalRepresentable: NSViewRepresentable {
         private var lastClearToken: UUID
         private var lastInputRequestID: UUID?
         private var lastTheme: TerminalTheme?
+        private var lastFontFamily: TerminalFontFamily?
+        private var lastFontSize: Double?
+        private var isActive = false
 
         init(controller: TerminalController, connectionToken: UUID) {
             self.controller = controller
@@ -150,11 +164,27 @@ struct InteractiveTerminalRepresentable: NSViewRepresentable {
             view: LocalProcessTerminalView,
             connectionToken: UUID,
             invocation: SSHInvocation?,
-            theme: TerminalTheme
+            theme: TerminalTheme,
+            fontFamily: TerminalFontFamily,
+            fontSize: Double,
+            isActive: Bool
         ) {
+            if self.isActive != isActive {
+                self.isActive = isActive
+                if isActive {
+                    focusIfActive(view)
+                } else if view.window?.firstResponder === view {
+                    view.window?.makeFirstResponder(nil)
+                }
+            }
             if lastTheme != theme {
                 lastTheme = theme
                 applyTheme(theme, to: view)
+            }
+            if lastFontFamily != fontFamily || lastFontSize != fontSize {
+                lastFontFamily = fontFamily
+                lastFontSize = fontSize
+                applyFont(fontFamily, size: fontSize, to: view)
             }
             if connectionToken != activeConnectionToken {
                 if view.process.running {
@@ -188,7 +218,7 @@ struct InteractiveTerminalRepresentable: NSViewRepresentable {
             {
                 lastInputRequestID = request.id
                 send(Array(request.text.utf8), to: view)
-                view.window?.makeFirstResponder(view)
+                focusIfActive(view)
             }
 
             guard
@@ -228,7 +258,17 @@ struct InteractiveTerminalRepresentable: NSViewRepresentable {
                 in: view,
                 token: connectionToken
             )
-            DispatchQueue.main.async {
+            focusIfActive(view)
+        }
+
+        private func focusIfActive(_ view: LocalProcessTerminalView) {
+            DispatchQueue.main.async { [weak self, weak view] in
+                guard
+                    let self,
+                    self.isActive,
+                    let view,
+                    self.terminalView === view
+                else { return }
                 view.window?.makeFirstResponder(view)
             }
         }
@@ -246,6 +286,52 @@ struct InteractiveTerminalRepresentable: NSViewRepresentable {
 /// here instead of only changing the terminal's initial option.
 final class SteadyCursorTerminalView: LocalProcessTerminalView {
     weak var restorationController: TerminalController?
+    private var remoteUsesAlternateScreen = false
+    private var interactionSequenceTail = ""
+    private var scrollerHideWorkItem: DispatchWorkItem?
+
+    func configureScrollerAutoHide() {
+        DispatchQueue.main.async { [weak self] in
+            self?.revealScrollerAndScheduleHide()
+        }
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        revealScrollerAndScheduleHide()
+        super.scrollWheel(with: event)
+    }
+
+    private func revealScrollerAndScheduleHide() {
+        guard let scroller = subviews.compactMap({ $0 as? NSScroller }).first else {
+            return
+        }
+        scrollerHideWorkItem?.cancel()
+        scroller.alphaValue = 1
+        let item = DispatchWorkItem { [weak scroller] in
+            guard let scroller else { return }
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.2
+                scroller.animator().alphaValue = 0
+            }
+        }
+        scrollerHideWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: item)
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        // SwiftUI can briefly collapse a retained terminal while switching
+        // tabs or workspace modes. Propagating that transient size to the PTY
+        // makes interactive redraws (notably zsh completion menus) render at
+        // only a handful of columns before the real frame is restored.
+        let isTransientCollapse = newSize.width < 120 || newSize.height < 60
+        // The app window itself has a much larger minimum size. A frame below
+        // this threshold is therefore always an intermediate SwiftUI layout,
+        // including the first layout pass of a retained background session.
+        // Sending it to mosh/tmux changes the remote PTY width and makes later
+        // cursor-addressed redraws overlap even after the real size returns.
+        guard !isTransientCollapse else { return }
+        super.setFrameSize(newSize)
+    }
 
     func insertFilePaths(_ paths: [String]) {
         let text = ShellPathInputFormatter.text(for: paths)
@@ -278,12 +364,20 @@ final class SteadyCursorTerminalView: LocalProcessTerminalView {
                 skipNullCellsFollowingWide: true
             ) ?? ""
 
-        var restoration = "\u{1B}[3J\u{1B}[2J\u{1B}[H"
+        // Reset origin mode and the scrolling margins before homing. tmux and
+        // other full-screen programs can leave either active; CSI H would then
+        // be relative to the old margin and the preserved editable line could
+        // reappear many rows below the top after a local clear.
+        var restoration =
+            "\u{1B}[?6l\u{1B}[r\u{1B}[3J\u{1B}[2J\u{1B}[H"
         restoration += currentLine + "\r"
         if cursor.x > 0 {
             restoration += "\u{1B}[\(cursor.x)C"
         }
         feed(text: restoration)
+        // Clearing the buffer does not itself reset SwiftTerm's viewport
+        // offset. Keep the restored editable line visible at the bottom.
+        scrollTo(row: Int.max, notifyAccessibility: false)
         setNeedsDisplay(bounds)
         restorationController?.terminalOutputDidChange()
     }
@@ -298,7 +392,40 @@ final class SteadyCursorTerminalView: LocalProcessTerminalView {
 
     override func dataReceived(slice: ArraySlice<UInt8>) {
         super.dataReceived(slice: slice)
+        trackAlternateScreen(in: Array(slice))
         restorationController?.terminalOutputDidChange(Array(slice))
+    }
+
+    func resetRemoteInteractionState() {
+        remoteUsesAlternateScreen = false
+        interactionSequenceTail = ""
+        allowMouseReporting = false
+        feed(text: "\u{1B}[?47l\u{1B}[?1047l\u{1B}[?1049l\u{1B}[?1000l\u{1B}[?1002l\u{1B}[?1003l\u{1B}[?1006l")
+    }
+
+    private func trackAlternateScreen(in bytes: [UInt8]) {
+        let chunk = String(decoding: bytes, as: UTF8.self)
+        let text = interactionSequenceTail + chunk
+        var changes: [(offset: Int, enabled: Bool)] = []
+        for mode in ["47", "1047", "1049"] {
+            for (suffix, enabled) in [("h", true), ("l", false)] {
+                let token = "\u{1B}[?\(mode)\(suffix)"
+                var search = text.startIndex..<text.endIndex
+                while let range = text.range(of: token, range: search) {
+                    changes.append((text.distance(from: text.startIndex, to: range.lowerBound), enabled))
+                    search = range.upperBound..<text.endIndex
+                }
+            }
+        }
+        for change in changes.sorted(by: { $0.offset < $1.offset }) {
+            remoteUsesAlternateScreen = change.enabled
+        }
+        // Restored output is reset before the live process starts, so the
+        // terminal's current mouse mode now reflects live remote output. tmux
+        // does not consistently emit a separately observable alternate-screen
+        // transition, making mouse mode the authoritative wheel-report gate.
+        allowMouseReporting = getTerminal().mouseMode != .off
+        interactionSequenceTail = String(text.suffix(24))
     }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
@@ -311,6 +438,13 @@ final class SteadyCursorTerminalView: LocalProcessTerminalView {
             key == "f"
         {
             showTerminalFindBar()
+            return true
+        }
+        if
+            relevantModifiers == .control,
+            (key == "/" || event.keyCode == 44)
+        {
+            process.send(data: [0x1F][...])
             return true
         }
         if relevantModifiers == .command, key == "g" {
@@ -378,14 +512,15 @@ extension TerminalController {
             view = SteadyCursorTerminalView(frame: .zero)
             view.optionAsMetaKey = true
             view.allowMouseReporting = true
+            view.scrollerStyle = .legacy
+            view.scrollerControlSize = .small
+            view.scrollerKnobStyle = .light
+            view.configureScrollerAutoHide()
             view.getTerminal().setCursorStyle(.steadyBlock)
             view.getTerminal().changeScrollback(scrollbackLines)
-            view.font =
-                NSFont(name: "NotoMonoForPowerline", size: 16) ??
-                NSFont.monospacedSystemFont(
-                    ofSize: 16,
-                    weight: .regular
-                )
+            view.font = TerminalFontFamily.saved.nsFont(
+                size: TerminalFontSizeSettings.savedSize
+            )
             retainTerminalView(view)
         }
         view.restorationController = self
@@ -402,6 +537,7 @@ extension TerminalController {
             let replay = SessionRestorationStore.replayBuffer(buffer)
             view.feed(byteArray: Array(replay)[...])
         }
+        view.resetRemoteInteractionState()
 
         var environment = invocation.environment
         environment["TERM"] = "xterm-256color"
@@ -501,6 +637,16 @@ private func applyTheme(
     view.caretTextColor = palette.background
     view.selectedTextBackgroundColor = palette.cursor.withAlphaComponent(0.35)
     view.installColors(palette.ansi.map(SwiftTerm.Color.init(hexRGB:)))
+}
+
+@MainActor
+private func applyFont(
+    _ family: TerminalFontFamily,
+    size: Double,
+    to view: LocalProcessTerminalView
+) {
+    let normalizedSize = TerminalFontSizeSettings.normalized(size)
+    view.font = family.nsFont(size: CGFloat(normalizedSize))
 }
 
 private extension SwiftTerm.Color {

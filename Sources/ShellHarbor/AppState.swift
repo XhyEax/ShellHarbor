@@ -25,6 +25,9 @@ final class AppState: ObservableObject {
     }
     @Published private(set) var shcliLinkStatus = ""
     @Published private(set) var shcliLinkStatusIsError = false
+    @Published private(set) var remoteMultiplexerSessions:
+        [UUID: [RemoteMultiplexerSession]] = [:]
+    @Published private(set) var loadingMultiplexerRemoteIDs = Set<UUID>()
     @Published private(set) var activeWorkspaceIDs: [UUID] = []
     @Published var selectedWorkspaceID: UUID?
     @Published private(set) var inspectionRecords = InspectionStore.load()
@@ -35,6 +38,23 @@ final class AppState: ObservableObject {
                 terminalTheme.rawValue,
                 forKey: "terminalTheme"
             )
+        }
+    }
+    @Published var terminalFont = TerminalFontFamily.saved {
+        didSet {
+            TerminalFontFamily.save(terminalFont)
+        }
+    }
+    @Published var terminalFontSize = TerminalFontSizeSettings.savedSize {
+        didSet {
+            let normalized = TerminalFontSizeSettings.normalized(
+                terminalFontSize
+            )
+            if terminalFontSize != normalized {
+                terminalFontSize = normalized
+                return
+            }
+            TerminalFontSizeSettings.save(normalized)
         }
     }
     @Published var terminalScrollbackLines =
@@ -60,6 +80,17 @@ final class AppState: ObservableObject {
                 localShell.rawValue,
                 forKey: "localShell"
             )
+            let profile = localProfile
+            for workspace in activeWorkspaces where
+                workspace.remoteID == localRemoteID
+            {
+                workspace.updateProfile(profile)
+            }
+        }
+    }
+    @Published var localStartPath: String {
+        didSet {
+            UserDefaults.standard.set(localStartPath, forKey: "localStartPath")
             let profile = localProfile
             for workspace in activeWorkspaces where
                 workspace.remoteID == localRemoteID
@@ -117,7 +148,12 @@ final class AppState: ObservableObject {
     }
 
     var localProfile: SessionProfile {
-        SessionProfile.local(id: localRemoteID, shell: localShell)
+        var profile = SessionProfile.local(id: localRemoteID, shell: localShell)
+        let path = localStartPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        profile.remoteStartPath = path.isEmpty
+            ? FileManager.default.homeDirectoryForCurrentUser.path
+            : NSString(string: path).expandingTildeInPath
+        return profile
     }
 
     func isPersistedRemote(_ remoteID: UUID) -> Bool {
@@ -139,6 +175,20 @@ final class AppState: ObservableObject {
         sessions = loaded
         savedProxies = NetworkProxyStore.load()
         localShell = .saved
+        let localDirectoryMigrationKey =
+            "localStartPathUsesHomeDefaultV1"
+        let savedLocalStartPath = UserDefaults.standard.string(
+            forKey: "localStartPath"
+        )
+        if
+            !UserDefaults.standard.bool(forKey: localDirectoryMigrationKey),
+            savedLocalStartPath == "/"
+        {
+            localStartPath = "~"
+        } else {
+            localStartPath = savedLocalStartPath ?? "~"
+        }
+        UserDefaults.standard.set(true, forKey: localDirectoryMigrationKey)
         selectedSessionID = loaded.first?.id ?? localRemoteID
         for profile in loaded {
             scheduleInspection(for: profile, runImmediately: true)
@@ -308,6 +358,26 @@ final class AppState: ObservableObject {
         }
         NetworkProxyStore.save(savedProxies)
         return proxy
+    }
+
+    func deleteSavedProxy(_ proxyID: UUID) {
+        guard savedProxies.contains(where: { $0.id == proxyID }) else { return }
+        for index in sessions.indices where sessions[index].savedProxyID == proxyID {
+            // The resolved fields already contain a full copy of the shared
+            // Proxy. Only detach the reference so existing Remotes continue
+            // to connect with their current configuration.
+            sessions[index].savedProxyID = nil
+        }
+        savedProxies.removeAll { $0.id == proxyID }
+        NetworkProxyStore.save(savedProxies)
+        SessionStore.save(sessions)
+        for workspace in activeWorkspaces {
+            guard let current = sessions.first(where: { $0.id == workspace.remoteID }) else {
+                continue
+            }
+            workspace.updateProfile(current)
+            workspace.updateJumpProfile(jumpProfile(for: current))
+        }
     }
 
     func duplicateSelectedSession() {
@@ -605,6 +675,7 @@ final class AppState: ObservableObject {
         profile: SessionProfile,
         restoration: RestorableSessionSnapshot? = nil,
         multiplexer: TerminalMultiplexer? = nil,
+        multiplexerSessionName: String? = nil,
         shouldSelect: Bool = true
     ) {
         let remoteID = profile.id
@@ -621,6 +692,9 @@ final class AppState: ObservableObject {
             multiplexer: restoration?.multiplexer ?? multiplexer,
             id: restoration?.workspaceID ?? UUID()
         )
+        if let multiplexerSessionName {
+            workspace.rename(to: multiplexerSessionName)
+        }
         workspace.terminal.setScrollbackLines(terminalScrollbackLines)
         if let restoration {
             workspace.applyRestoration(restoration)
@@ -668,6 +742,7 @@ final class AppState: ObservableObject {
             let workspace = workspaces[workspaceID]
         else { return }
         workspace.terminal.disconnect(appendMessage: false)
+        workspace.portForwards.stopAll()
         workspaces.removeValue(forKey: workspaceID)
         activeWorkspaceIDs.remove(at: index)
         if lastWorkspaceByRemote[workspace.remoteID] == workspaceID {
@@ -740,14 +815,56 @@ final class AppState: ObservableObject {
 
     func launchMultiplexer(
         _ multiplexer: TerminalMultiplexer,
-        for remoteID: UUID
+        for remoteID: UUID,
+        sessionName: String? = nil
     ) {
         guard
             remoteID != localRemoteID,
             let profile = sessions.first(where: { $0.id == remoteID })
         else { return }
         selectSession(remoteID)
-        openWorkspace(profile: profile, multiplexer: multiplexer)
+        openWorkspace(
+            profile: profile,
+            multiplexer: multiplexer,
+            multiplexerSessionName: sessionName
+        )
+    }
+
+    func refreshMultiplexerSessions(for remoteID: UUID) {
+        guard
+            remoteID != localRemoteID,
+            !loadingMultiplexerRemoteIDs.contains(remoteID),
+            let storedProfile = sessions.first(where: { $0.id == remoteID })
+        else { return }
+        loadingMultiplexerRemoteIDs.insert(remoteID)
+        Task { [weak self] in
+            guard let self else { return }
+            defer { loadingMultiplexerRemoteIDs.remove(remoteID) }
+            var profile = storedProfile
+            var jumpProfile = jumpProfile(for: profile)
+            do {
+                if var jump = jumpProfile {
+                    if let port = try await tailscaleProxyManager.ensureRunning(for: jump) {
+                        jump.proxyPort = port
+                        jumpProfile = jump
+                    }
+                } else if let port = try await tailscaleProxyManager.ensureRunning(for: profile) {
+                    profile.proxyPort = port
+                }
+                let invocation = try SSHCommandBuilder.ssh(
+                    profile: profile,
+                    jumpProfile: jumpProfile,
+                    command: RemoteMultiplexerSessionService.listingCommand,
+                    connectionTimeoutSeconds: 8,
+                    batchMode: true
+                )
+                let result = try await CommandRunner.run(invocation)
+                remoteMultiplexerSessions[remoteID] =
+                    RemoteMultiplexerSessionService.parse(result.output)
+            } catch {
+                remoteMultiplexerSessions[remoteID] = []
+            }
+        }
     }
 
     func reconnect() {
@@ -755,11 +872,52 @@ final class AppState: ObservableObject {
             notice = "请先选择一个已打开的 Session。"
             return
         }
+        reconnect(workspace)
+    }
+
+    func reconnect(_ workspace: SessionWorkspace) {
         startConnection(in: workspace)
     }
 
     func disconnect() {
         selectedWorkspace?.terminal.disconnect()
+    }
+
+    func startPortForward(
+        _ rule: PortForwardRule,
+        in workspace: SessionWorkspace
+    ) {
+        Task { [weak self, weak workspace] in
+            guard let self, let workspace else { return }
+            var profile = workspace.connectionProfile
+            var jumpProfile = workspace.connectionJumpProfile
+            do {
+                if var routingJump = jumpProfile {
+                    if let port = try await tailscaleProxyManager.ensureRunning(
+                        for: routingJump
+                    ) {
+                        routingJump.proxyPort = port
+                        jumpProfile = routingJump
+                    }
+                } else if let port = try await tailscaleProxyManager.ensureRunning(
+                    for: profile
+                ) {
+                    profile.proxyPort = port
+                }
+            } catch {
+                workspace.portForwards.fail(
+                    rule.id,
+                    message: error.localizedDescription
+                )
+                return
+            }
+            guard self.workspaces[workspace.id] === workspace else { return }
+            workspace.portForwards.start(
+                rule,
+                profile: profile,
+                jumpProfile: jumpProfile
+            )
+        }
     }
 
     func closeCurrentSession() {
@@ -771,7 +929,12 @@ final class AppState: ObservableObject {
         workspace.terminal.beginPreparingConnection()
         Task { [weak self, weak workspace] in
             guard let self, let workspace else { return }
-            var profile = workspace.profile
+            // Local defaults are global settings. A restored workspace may
+            // still carry the profile captured when its old shell was in `/`;
+            // always resolve the current Local profile at process start.
+            var profile = workspace.profile.isLocalConnection
+                ? localProfile
+                : workspace.profile
             var jumpProfile = workspace.jumpProfile
             do {
                 if var routingJump = jumpProfile {
@@ -792,10 +955,27 @@ final class AppState: ObservableObject {
                 {
                     let routingProxy = jumpProfile ?? profile
                     if routingProxy.resolvedProxyType == .tailscale {
-                        let relay = try await tailscaleProxyManager
-                            .moshRelayConfiguration(for: routingProxy)
-                        profile.tailscaleMoshControlPort = relay.controlPort
-                        profile.tailscaleMoshClientPath = relay.clientPath
+                        // Mosh must not be launched until its UDP path exists.
+                        // Creating the relay lazily from the mosh-client wrapper
+                        // races a cold tsnet start during session restoration
+                        // and turns the dependency failure into exit status 10
+                        // (reported by the PTY as 2560).
+                        profile.tailscaleMoshPortRange =
+                            try await tailscaleProxyManager.prepareMoshRelay(
+                                proxyProfile: routingProxy,
+                                targetHost: profile.resolvedHost
+                            )
+                        profile.tailscaleMoshControlPort = nil
+                        profile.tailscaleMoshClientPath = nil
+
+                        // A freshly started tsnet node can report Up and bind
+                        // the local relay before its peer/DERP path has fully
+                        // settled. Mosh starts sending UDP immediately and
+                        // exits with status 10 (raw wait status 2560) if that
+                        // first exchange is lost. Give cold-start restoration
+                        // a short stabilization window after every dependency
+                        // has been created and before launching Mosh.
+                        try await Task.sleep(for: .seconds(3))
                     }
                 }
             } catch {
@@ -804,16 +984,21 @@ final class AppState: ObservableObject {
                 )
                 return
             }
-            guard self.workspaces[workspace.id] === workspace else { return }
+            guard
+                !Task.isCancelled,
+                self.workspaces[workspace.id] === workspace
+            else { return }
+            workspace.updateConnectionRouting(
+                profile: profile,
+                jumpProfile: jumpProfile
+            )
             if !workspace.profile.isLocalConnection {
                 inspectNow(workspace.remoteID)
             }
             workspace.terminal.connect(
                 profile: profile,
                 jumpProfile: jumpProfile,
-                startupCommand: workspace.multiplexer?.startupCommand(
-                    sessionName: workspace.sessionLabel
-                )
+                startupCommand: workspace.consumeMultiplexerStartupCommand()
             )
             workspace.terminal.startProcessIfNeeded()
         }
@@ -901,8 +1086,8 @@ final class AppState: ObservableObject {
         defer { workspace.isLoadingCommandHistory = false }
         do {
             workspace.commandHistory = try await RemoteHistoryService.load(
-                profile: workspace.profile,
-                jumpProfile: workspace.jumpProfile
+                profile: workspace.connectionProfile,
+                jumpProfile: workspace.connectionJumpProfile
             )
         } catch {
             notice = "远程命令历史读取失败：\(error.localizedDescription)"
@@ -1003,7 +1188,7 @@ final class AppState: ObservableObject {
         guard !workspace.isLoadingRemote else { return }
         _ = await refreshRemote(
             workspace: workspace,
-            profile: workspace.profile,
+            profile: workspace.connectionProfile,
             preservingSelection: true
         )
     }
@@ -1023,7 +1208,7 @@ final class AppState: ObservableObject {
         let hasRememberedPath = workspace.remotePath != defaultPath
         let restored = await refreshRemote(
             workspace: workspace,
-            profile: workspace.profile,
+            profile: workspace.connectionProfile,
             reportErrors: false
         )
         if restored {
@@ -1032,7 +1217,7 @@ final class AppState: ObservableObject {
             workspace.remotePath = defaultPath
             let fallbackLoaded = await refreshRemote(
                 workspace: workspace,
-                profile: workspace.profile,
+                profile: workspace.connectionProfile,
                 reportErrors: false
             )
             if fallbackLoaded {
@@ -1181,7 +1366,7 @@ final class AppState: ObservableObject {
     func refreshRemote(in workspace: SessionWorkspace) async {
         _ = await refreshRemote(
             workspace: workspace,
-            profile: workspace.profile
+            profile: workspace.connectionProfile
         )
     }
 
@@ -1199,8 +1384,8 @@ final class AppState: ObservableObject {
             defer { workspace.isLoadingRemote = false }
             do {
                 let navigation = try await RemoteFileService.resolvedNavigation(
-                    profile: workspace.profile,
-                    jumpProfile: workspace.jumpProfile,
+                    profile: workspace.connectionProfile,
+                    jumpProfile: workspace.connectionJumpProfile,
                     path: destination
                 )
                 let listing = navigation.listing
@@ -1239,7 +1424,7 @@ final class AppState: ObservableObject {
         do {
             let listing = try await RemoteFileService.resolvedListing(
                 profile: profile,
-                jumpProfile: workspace.jumpProfile,
+                jumpProfile: workspace.connectionJumpProfile,
                 path: workspace.remotePath
             )
             workspace.remotePath = listing.path
@@ -1270,7 +1455,7 @@ final class AppState: ObservableObject {
             Task {
                 await refreshRemote(
                     workspace: workspace,
-                    profile: workspace.profile
+                    profile: workspace.connectionProfile
                 )
             }
         } else {
@@ -1298,14 +1483,14 @@ final class AppState: ObservableObject {
         Task {
             do {
                 let destination = try await RemoteFileService.rename(
-                    profile: workspace.profile,
-                    jumpProfile: workspace.jumpProfile,
+                    profile: workspace.connectionProfile,
+                    jumpProfile: workspace.connectionJumpProfile,
                     entry: entry,
                     newName: newName
                 )
                 let listing = try await RemoteFileService.resolvedListing(
-                    profile: workspace.profile,
-                    jumpProfile: workspace.jumpProfile,
+                    profile: workspace.connectionProfile,
+                    jumpProfile: workspace.connectionJumpProfile,
                     path: currentPath
                 )
                 guard workspace.remotePath == currentPath else { return }
@@ -1329,7 +1514,7 @@ final class AppState: ObservableObject {
         Task {
             await refreshRemote(
                 workspace: workspace,
-                profile: workspace.profile
+                profile: workspace.connectionProfile
             )
         }
     }
@@ -1340,14 +1525,14 @@ final class AppState: ObservableObject {
         Task {
             do {
                 try await RemoteFileService.createDirectory(
-                    profile: workspace.profile,
-                    jumpProfile: workspace.jumpProfile,
+                    profile: workspace.connectionProfile,
+                    jumpProfile: workspace.connectionJumpProfile,
                     parentPath: parentPath,
                     name: name
                 )
                 await refreshRemote(
                     workspace: workspace,
-                    profile: workspace.profile
+                    profile: workspace.connectionProfile
                 )
             } catch {
                 notice = "创建远程文件夹失败：\(error.localizedDescription)"
@@ -1365,14 +1550,14 @@ final class AppState: ObservableObject {
             do {
                 for entry in entries {
                     try await RemoteFileService.delete(
-                        profile: workspace.profile,
-                        jumpProfile: workspace.jumpProfile,
+                        profile: workspace.connectionProfile,
+                        jumpProfile: workspace.connectionJumpProfile,
                         entry: entry
                     )
                 }
                 await refreshRemote(
                     workspace: workspace,
-                    profile: workspace.profile
+                    profile: workspace.connectionProfile
                 )
             } catch {
                 notice = "删除失败：\(error.localizedDescription)"
@@ -1418,8 +1603,8 @@ final class AppState: ObservableObject {
         Task {
             do {
                 let listing = try await RemoteFileService.resolvedListing(
-                    profile: workspace.profile,
-                    jumpProfile: workspace.jumpProfile,
+                    profile: workspace.connectionProfile,
+                    jumpProfile: workspace.connectionJumpProfile,
                     path: remoteDirectory
                 )
                 enqueueUploads(
@@ -1654,7 +1839,7 @@ final class AppState: ObservableObject {
                     await monitorUploadProgress(
                         item.id,
                         destination: destination,
-                        profile: workspace.profile,
+                        profile: workspace.connectionProfile,
                         in: workspace
                     )
                 }
@@ -1672,8 +1857,8 @@ final class AppState: ObservableObject {
             defer { progressTask?.cancel() }
             do {
                 let invocation = try SSHCommandBuilder.scp(
-                    profile: workspace.profile,
-                    jumpProfile: workspace.jumpProfile,
+                    profile: workspace.connectionProfile,
+                    jumpProfile: workspace.connectionJumpProfile,
                     localPath: direction == .upload ? source : destination,
                     remotePath: direction == .upload ? destination : source,
                     direction: direction,
@@ -1723,7 +1908,7 @@ final class AppState: ObservableObject {
                     if direction == .upload {
                         await refreshRemote(
                             workspace: workspace,
-                            profile: workspace.profile
+                            profile: workspace.connectionProfile
                         )
                     } else {
                         workspace.reloadLocal()
@@ -1877,7 +2062,7 @@ final class AppState: ObservableObject {
             guard
                 let bytes = try? await RemoteFileService.pathSize(
                     profile: profile,
-                    jumpProfile: workspace.jumpProfile,
+                    jumpProfile: workspace.connectionJumpProfile,
                     path: destination
                 )
             else {
