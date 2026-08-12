@@ -209,8 +209,16 @@ struct FileTransferView: View {
     let isAutoRefreshActive: Bool
 
     var body: some View {
-        VStack(spacing: 0) {
-            GeometryReader { geometry in
+        GeometryReader { container in
+            let queueHeight: CGFloat = workspace.showTransfers ? 195 : 34
+            let dividerHeight: CGFloat = 1
+            let fileAreaHeight = max(
+                0,
+                container.size.height - queueHeight - dividerHeight
+            )
+
+            VStack(spacing: 0) {
+                GeometryReader { geometry in
                 let dividerWidth: CGFloat = 1
                 let paneWidth = max(
                     0,
@@ -241,42 +249,17 @@ struct FileTransferView: View {
                     alignment: .leading
                 )
                 .clipped()
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .clipped()
-
-            Divider()
-
-            VStack(spacing: 0) {
-                HStack {
-                    Button {
-                        withAnimation { workspace.showTransfers.toggle() }
-                    } label: {
-                        Image(systemName: workspace.showTransfers ? "chevron.down" : "chevron.right")
-                    }
-                    .buttonStyle(.borderless)
-                    Text("传输队列")
-                        .font(.subheadline.weight(.semibold))
-                    if !workspace.showTransfers {
-                        collapsedTransferSummary
-                    }
-                    Spacer()
-                    Button("清除已完成") {
-                        workspace.transfers.removeAll { $0.status == .finished }
-                    }
-                    .buttonStyle(.borderless)
-                    .font(.caption)
                 }
-                .padding(.horizontal, 12)
-                .frame(height: 34)
-                .background(Color(nsColor: .controlBackgroundColor))
+                .frame(height: fileAreaHeight)
+                .clipped()
 
-                if workspace.showTransfers {
-                    Divider()
-                    TransferQueueView(workspace: workspace)
-                        .frame(height: 160)
-                }
+                Divider()
+                    .frame(height: dividerHeight)
+
+                transferQueue
+                    .frame(height: queueHeight, alignment: .top)
             }
+            .frame(width: container.size.width, height: container.size.height)
         }
         .task(id: isAutoRefreshActive) {
             guard isAutoRefreshActive else { return }
@@ -295,6 +278,39 @@ struct FileTransferView: View {
             }
             Task {
                 await state.loadRemoteFilesIfNeeded(in: workspace)
+            }
+        }
+    }
+
+    private var transferQueue: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Button {
+                    withAnimation { workspace.showTransfers.toggle() }
+                } label: {
+                    Image(systemName: workspace.showTransfers ? "chevron.down" : "chevron.right")
+                }
+                .buttonStyle(.borderless)
+                Text("传输队列")
+                    .font(.subheadline.weight(.semibold))
+                if !workspace.showTransfers {
+                    collapsedTransferSummary
+                }
+                Spacer()
+                Button("清除已完成") {
+                    workspace.transfers.removeAll { $0.status == .finished }
+                }
+                .buttonStyle(.borderless)
+                .font(.caption)
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 34)
+            .background(Color(nsColor: .controlBackgroundColor))
+
+            if workspace.showTransfers {
+                Divider()
+                TransferQueueView(workspace: workspace)
+                    .frame(height: 160)
             }
         }
     }
@@ -1092,6 +1108,8 @@ private struct FilePane: View {
                     }
                 }
             }
+            .frame(minHeight: 1, maxHeight: .infinity)
+            .layoutPriority(1)
             .overlay {
                 fileListOverlay
             }

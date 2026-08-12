@@ -1630,7 +1630,6 @@ private struct WorkspaceContent: View {
                             mode == .forwarding
                     )
                     .offset(y: filesOffset)
-                    .clipped()
 
                 InspectionLogView(workspace: workspace)
                     .frame(height: contentHeight)
