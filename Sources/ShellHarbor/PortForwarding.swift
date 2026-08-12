@@ -1,7 +1,8 @@
 import Combine
+import Darwin
 import Foundation
 
-enum PortForwardDirection: String, CaseIterable, Identifiable {
+enum PortForwardDirection: String, CaseIterable, Identifiable, Codable {
     case local
     case remote
     case dynamic
@@ -25,7 +26,7 @@ enum PortForwardDirection: String, CaseIterable, Identifiable {
     }
 }
 
-struct PortForwardRule: Identifiable, Equatable {
+struct PortForwardRule: Identifiable, Equatable, Codable {
     let id: UUID
     var direction: PortForwardDirection
     var bindHost: String
@@ -36,7 +37,7 @@ struct PortForwardRule: Identifiable, Equatable {
     init(
         id: UUID = UUID(),
         direction: PortForwardDirection = .local,
-        bindHost: String = "127.0.0.1",
+        bindHost: String = "0.0.0.0",
         listenPort: Int = 8080,
         destinationHost: String = "127.0.0.1",
         destinationPort: Int = 80
@@ -68,6 +69,36 @@ struct PortForwardRule: Identifiable, Equatable {
                     in: .whitespacesAndNewlines
                 ).isEmpty && (1...65_535).contains(destinationPort)
             ))
+    }
+}
+
+enum LocalNetworkAddresses {
+    static var ipv4: [String] {
+        var pointer: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&pointer) == 0, let first = pointer else { return [] }
+        defer { freeifaddrs(pointer) }
+        var values: [String] = []
+        for item in sequence(first: first, next: { $0.pointee.ifa_next }) {
+            let flags = Int32(item.pointee.ifa_flags)
+            guard flags & IFF_UP != 0,
+                  flags & IFF_LOOPBACK == 0,
+                  item.pointee.ifa_addr.pointee.sa_family == UInt8(AF_INET)
+            else { continue }
+            var address = item.pointee.ifa_addr.pointee
+            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            guard getnameinfo(
+                &address,
+                socklen_t(item.pointee.ifa_addr.pointee.sa_len),
+                &host,
+                socklen_t(host.count),
+                nil,
+                0,
+                NI_NUMERICHOST
+            ) == 0 else { continue }
+            let end = host.firstIndex(of: 0) ?? host.endIndex
+            values.append(String(decoding: host[..<end].map(UInt8.init(bitPattern:)), as: UTF8.self))
+        }
+        return Array(Set(values)).sorted()
     }
 }
 

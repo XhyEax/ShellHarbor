@@ -1168,7 +1168,7 @@ public final class Buffer {
                     scroll(true)
                 } else {
                     _y += 1
-                    _lines[_y].isWrapped = true
+                    _lines[_y + _yBase].isWrapped = true
                 }
             }
             let available = right - _x + 1
@@ -1208,7 +1208,7 @@ public final class Buffer {
                     // The line already exists (eg. the initial viewport), mark it as a
                     // wrapped line
                     _y += 1
-                    _lines [_y].isWrapped = true
+                    _lines [_y + _yBase].isWrapped = true
                 }
                 // row changed, get it again
             } else {

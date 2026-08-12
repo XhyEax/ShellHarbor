@@ -19,6 +19,12 @@ struct PortForwardView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+                if !LocalNetworkAddresses.ipv4.isEmpty {
+                    Text("本机 IP：\(LocalNetworkAddresses.ipv4.joined(separator: "  "))")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
                 Spacer()
                 Button {
                     workspace.portForwardRules.append(PortForwardRule())
@@ -56,6 +62,9 @@ struct PortForwardView: View {
             }
         }
         .background(Color(nsColor: .controlBackgroundColor))
+        .onChange(of: workspace.portForwardRules) { _, _ in
+            state.rememberPortForwardRules()
+        }
     }
 
     private func ruleEditor(_ rule: Binding<PortForwardRule>) -> some View {
@@ -73,7 +82,11 @@ struct PortForwardView: View {
 
                 TextField("监听地址", text: rule.bindHost)
                     .textFieldStyle(.roundedBorder)
-                TextField("监听端口", value: rule.listenPort, format: .number)
+                TextField(
+                    "监听端口",
+                    value: rule.listenPort,
+                    format: .number.grouping(.never)
+                )
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 100)
 
@@ -82,7 +95,11 @@ struct PortForwardView: View {
                         .foregroundStyle(.secondary)
                     TextField("目标地址", text: rule.destinationHost)
                         .textFieldStyle(.roundedBorder)
-                    TextField("目标端口", value: rule.destinationPort, format: .number)
+                    TextField(
+                        "目标端口",
+                        value: rule.destinationPort,
+                        format: .number.grouping(.never)
+                    )
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 100)
                 }

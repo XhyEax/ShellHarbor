@@ -22,6 +22,19 @@ final class TerminalCoreTests {
         TerminalTestHarness.assertLineText(terminal.buffer, row: 1, equals: "")
     }
 
+    @Test func leavingAlternateScreenBeforeEntryCanRestoreWraparound() {
+        let (terminal, _) = TerminalTestHarness.makeTerminal(cols: 5, rows: 2)
+        terminal.feed(text: "\(esc)[?1049l")
+        terminal.feed(text: "helloX")
+
+        TerminalTestHarness.assertLineText(terminal.buffer, row: 0, equals: "hellX")
+        TerminalTestHarness.assertLineText(terminal.buffer, row: 1, equals: "")
+
+        terminal.feed(text: "\(esc)[?7h\(esc)[2J\(esc)[HhelloX")
+        TerminalTestHarness.assertLineText(terminal.buffer, row: 0, equals: "hello")
+        TerminalTestHarness.assertLineText(terminal.buffer, row: 1, equals: "X")
+    }
+
     @Test func testReverseWraparoundBackspace() {
         let (terminal, _) = TerminalTestHarness.makeTerminal(cols: 5, rows: 2)
         terminal.feed(text: "\(esc)[?45h")

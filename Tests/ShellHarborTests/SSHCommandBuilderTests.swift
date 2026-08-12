@@ -7,6 +7,10 @@ import ShellHarborCLIKit
 import SwiftTerm
 
 final class SSHCommandBuilderTests: XCTestCase {
+    func testPortForwardDefaultsToAllLocalInterfaces() {
+        XCTAssertEqual(PortForwardRule().bindHost, "0.0.0.0")
+    }
+
     func testLocalPortForwardBuildsSSHArguments() throws {
         var profile = SessionProfile()
         profile.host = "server.example"
@@ -240,6 +244,15 @@ final class SSHCommandBuilderTests: XCTestCase {
         )
     }
 
+    func testOnlyActiveTransfersReserveCollisionDestination() {
+        XCTAssertTrue(TransferStatus.queued.reservesDestination)
+        XCTAssertTrue(TransferStatus.running.reservesDestination)
+        XCTAssertTrue(TransferStatus.paused.reservesDestination)
+        XCTAssertFalse(TransferStatus.finished.reservesDestination)
+        XCTAssertFalse(TransferStatus.failed("failed").reservesDestination)
+        XCTAssertFalse(TransferStatus.cancelled.reservesDestination)
+    }
+
     func testRenameCaretStopsBeforeFileExtension() {
         XCTAssertEqual(
             FileNameEditing.renameCaretOffset(
@@ -395,7 +408,14 @@ final class SSHCommandBuilderTests: XCTestCase {
                     remotePath: "/var/log",
                     terminalDirectory: "/srv/app",
                     terminalBuffer: Data("buffer".utf8),
-                    pendingCommand: "tail -f app.log"
+                    pendingCommand: "tail -f app.log",
+                    portForwardRules: [
+                        PortForwardRule(
+                            listenPort: 9000,
+                            destinationHost: "service.internal",
+                            destinationPort: 9001
+                        )
+                    ]
                 )
             ]
         )
@@ -407,6 +427,7 @@ final class SSHCommandBuilderTests: XCTestCase {
         )
 
         XCTAssertEqual(decoded, archive)
+        XCTAssertEqual(decoded.sessions[0].portForwardRules?.count, 1)
     }
 
     @MainActor
@@ -433,6 +454,7 @@ final class SSHCommandBuilderTests: XCTestCase {
         XCTAssertEqual(
             TerminalFontFamily.allCases.map(\.rawValue),
             [
+                "Noto Mono for Powerline",
                 "DejaVu Sans Mono",
                 "PT Mono",
                 "Source Code Pro Medium",
@@ -1779,7 +1801,7 @@ final class SSHCommandBuilderTests: XCTestCase {
     }
 
     @MainActor
-    func testTerminalFindBarCanBeShown() {
+    func testTerminalFindBarCanBeShown() async {
         let terminal = SteadyCursorTerminalView(frame: .init(
             x: 0,
             y: 0,
@@ -1787,7 +1809,10 @@ final class SSHCommandBuilderTests: XCTestCase {
             height: 500
         ))
 
-        terminal.showTerminalFindBar()
+        let controller = TerminalController()
+        controller.retainTerminalView(terminal)
+        controller.showFind()
+        await Task.yield()
 
         XCTAssertTrue(containsSearchField(in: terminal))
     }

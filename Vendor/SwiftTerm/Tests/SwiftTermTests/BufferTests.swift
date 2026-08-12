@@ -16,6 +16,28 @@ final class BufferTests: TerminalDelegate {
         // Required by TerminalDelegate
     }
 
+    @Test func asciiFastPathMarksVisibleWrappedRowAfterScrollback() {
+        let terminal = Terminal(
+            delegate: self,
+            options: TerminalOptions(cols: 10, rows: 3, scrollback: 100)
+        )
+        for index in 0..<8 {
+            terminal.feed(text: "line\(index)\r\n")
+        }
+        #expect(terminal.buffer.yBase > 0)
+
+        terminal.feed(text: "\u{1B}[2;1H\u{1B}[2K")
+        terminal.feed(text: "aaaaaaaaaaaa")
+
+        let visibleRow = terminal.buffer.y + terminal.buffer.yBase
+        let text = terminal.buffer.lines[visibleRow].translateToString(
+            trimRight: true,
+            skipNullCellsFollowingWide: true
+        )
+        #expect(text == "aa")
+        #expect(terminal.buffer.lines[visibleRow].isWrapped)
+    }
+
     /// Test for issue #256: yBase was not reset in Buffer.clear(), causing crashes
     /// when switching between normal and alternate buffers.
     ///

@@ -281,13 +281,20 @@ struct FileTransferView: View {
         .task(id: isAutoRefreshActive) {
             guard isAutoRefreshActive else { return }
             while !Task.isCancelled {
+                await state.automaticallyRefreshFiles(in: workspace)
                 do {
                     try await Task.sleep(for: .seconds(15))
                 } catch {
                     return
                 }
-                guard !Task.isCancelled else { return }
-                await state.automaticallyRefreshFiles(in: workspace)
+            }
+        }
+        .onChange(of: workspace.terminal.state) { _, connectionState in
+            guard isAutoRefreshActive, connectionState == .connected else {
+                return
+            }
+            Task {
+                await state.loadRemoteFilesIfNeeded(in: workspace)
             }
         }
     }
@@ -624,9 +631,7 @@ private struct LocalFilePane: View {
                     currentDirectory: workspace.localPath
                 )
             },
-            recentPaths: TransferRecentDirectoryResolver.localDirectories(
-                from: workspace.transfers
-            ),
+            recentPaths: state.globalRecentLocalDirectories,
             onRecentPathSelect: {
                 state.navigateLocal(to: $0, in: workspace)
             },

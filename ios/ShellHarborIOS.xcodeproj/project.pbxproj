@@ -42,9 +42,22 @@
 		A30000000000000000000008 /* libz.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = libz.tbd; path = usr/lib/libz.tbd; sourceTree = SDKROOT; };
 /* End PBXFileReference section */
 
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		A40000000000000000000001 /* Exceptions for "ShellHarborIOS" folder in "ShellHarborIOS" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = A10000000000000000000002 /* ShellHarborIOS */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		A1000000000000000000000A /* ShellHarborIOS */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				A40000000000000000000001 /* Exceptions for "ShellHarborIOS" folder in "ShellHarborIOS" target */,
+			);
 			path = ShellHarborIOS;
 			sourceTree = "<group>";
 		};
@@ -222,12 +235,16 @@
 				DEVELOPMENT_TEAM = BFD6WTWN8R;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = ShellHarborIOS/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = ShellHarbor;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
 				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
-				INFOPLIST_KEY_UIFileSharingEnabled = YES;
+				INFOPLIST_KEY_NSLocationAlwaysAndWhenInUseUsageDescription = "ShellHarbor 使用低精度后台定位维持用户主动建立的远程终端连接。";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "ShellHarbor 使用定位权限维持用户主动建立的远程终端连接。";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UIBackgroundModes = location;
+				INFOPLIST_KEY_UIFileSharingEnabled = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
@@ -258,12 +275,16 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = BFD6WTWN8R;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = ShellHarborIOS/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = ShellHarbor;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
 				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
-				INFOPLIST_KEY_UIFileSharingEnabled = YES;
+				INFOPLIST_KEY_NSLocationAlwaysAndWhenInUseUsageDescription = "ShellHarbor 使用低精度后台定位维持用户主动建立的远程终端连接。";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "ShellHarbor 使用定位权限维持用户主动建立的远程终端连接。";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UIBackgroundModes = location;
+				INFOPLIST_KEY_UIFileSharingEnabled = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
@@ -309,21 +330,21 @@
 /* End XCConfigurationList section */
 
 /* Begin XCLocalSwiftPackageReference section */
+		A20000000000000000000003 /* XCLocalSwiftPackageReference "Vendor/SwiftTerm" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Vendor/SwiftTerm;
+		};
+		A20000000000000000000004 /* XCLocalSwiftPackageReference "Vendor/Citadel" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Vendor/Citadel;
+		};
 		A2000000000000000000000F /* XCLocalSwiftPackageReference "Vendor/swift-nio-ssh" */ = {
 			isa = XCLocalSwiftPackageReference;
 			relativePath = "Vendor/swift-nio-ssh";
 		};
-		A20000000000000000000004 /* XCLocalSwiftPackageReference "Vendor/Citadel" */ = {
-			isa = XCLocalSwiftPackageReference;
-			relativePath = "Vendor/Citadel";
-		};
 		A20000000000000000000011 /* XCLocalSwiftPackageReference "Vendor/swift-crypto" */ = {
 			isa = XCLocalSwiftPackageReference;
 			relativePath = "Vendor/swift-crypto";
-		};
-		A20000000000000000000003 /* XCLocalSwiftPackageReference "Vendor/SwiftTerm" */ = {
-			isa = XCLocalSwiftPackageReference;
-			relativePath = "Vendor/SwiftTerm";
 		};
 /* End XCLocalSwiftPackageReference section */
 

@@ -17,6 +17,7 @@ struct RestorableSessionSnapshot: Codable, Equatable {
     let terminalBuffer: Data?
     let pendingCommand: String?
     var multiplexer: TerminalMultiplexer? = nil
+    var portForwardRules: [PortForwardRule]?
 }
 
 enum SessionRestorationStore {

@@ -72,7 +72,13 @@ extension TerminalView {
     {
         resetCaches()
         self.cellDimension = computeFontDimensions ()
-        let newCols = Int(frame.width / cellDimension.width)
+        // Keep font-driven resizing consistent with processSizeChange. On
+        // macOS the legacy scroller occupies part of the frame; including it
+        // here reports more PTY columns than can actually be drawn and long
+        // lines wrap at different positions in the child and the renderer.
+        let newCols = Int(
+            getEffectiveWidth(size: frame.size) / cellDimension.width
+        )
         let newRows = Int(frame.height / cellDimension.height)
         resize(cols: newCols, rows: newRows)
         updateCaretView()

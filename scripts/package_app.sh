@@ -25,6 +25,7 @@ cp "$PROJECT_ROOT/.build/tailscale-proxy-helper" \
   "$PROJECT_ROOT/dist/tailscale-proxy-helper"
 cp "$RELEASE_BIN_PATH/shcli" "$PROJECT_ROOT/dist/shcli"
 cp "$PROJECT_ROOT/Resources/Info.plist" "$CONTENTS_PATH/Info.plist"
+cp -R "$PROJECT_ROOT/Resources/Fonts" "$CONTENTS_PATH/Resources/Fonts"
 cp -R \
   "$RELEASE_BIN_PATH/SwiftTerm_SwiftTerm.bundle" \
   "$CONTENTS_PATH/Resources/SwiftTerm_SwiftTerm.bundle"

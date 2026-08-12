@@ -3,6 +3,7 @@ import SwiftUI
 import UIKit
 
 enum MobileTerminalFont: String, CaseIterable, Identifiable {
+    case notoMonoForPowerline = "Noto Mono for Powerline"
     case dejaVuSansMono = "DejaVu Sans Mono"
     case ptMono = "PT Mono"
     case sourceCodeProMedium = "Source Code Pro Medium"
@@ -17,15 +18,18 @@ enum MobileTerminalFont: String, CaseIterable, Identifiable {
 
     private var fontNames: [String] {
         switch self {
-        case .dejaVuSansMono: ["DejaVuSansMono", rawValue]
+        case .notoMonoForPowerline:
+            ["NotoMonoForPowerline", "Noto Mono for Powerline", "NotoMono-Regular"]
+        case .dejaVuSansMono: ["DejaVuSansMonoPowerline", "DejaVuSansMono", rawValue]
         case .ptMono: ["PTMono-Regular", rawValue]
-        case .sourceCodeProMedium: ["SourceCodePro-Medium", rawValue]
-        case .ubuntuMono: ["UbuntuMono-Regular", rawValue]
+        case .sourceCodeProMedium: ["SourceCodeProForPowerline-Medium", "SourceCodePro-Medium", rawValue]
+        case .ubuntuMono: ["UbuntuMonoDerivativePowerline-Regular", "UbuntuMono-Regular", rawValue]
         case .courierNew: ["CourierNewPSMT", rawValue]
         case .cascadiaCode: ["CascadiaCode-Regular", rawValue]
         case .firaCode: ["FiraCode-Regular", rawValue]
         case .jetBrainsMono: ["JetBrainsMono-Regular", rawValue]
-        case .meslo: ["MesloLGM-Regular", "MesloLGMDZ-Regular", rawValue]
+        case .meslo:
+            ["MesloLGMDZForPowerline-Regular", "MesloLGM-Regular", "MesloLGMDZ-Regular", rawValue]
         }
     }
 
@@ -130,6 +134,7 @@ private struct MobileTerminalPalette {
 private final class MobileTerminalNativeView: TerminalView, UIGestureRecognizerDelegate {
     private let hiddenKeyboardView = UIView(frame: .zero)
     private var remoteScrollGesture: UIPanGestureRecognizer?
+    private var remoteMouseMode: SwiftTerm.Terminal.MouseMode = .off
     private var remoteUsesAlternateScreen = false
     private var interactionSequenceTail = ""
 
@@ -143,27 +148,26 @@ private final class MobileTerminalNativeView: TerminalView, UIGestureRecognizerD
     }
 
     override func mouseModeChanged(source: SwiftTerm.Terminal) {
+        remoteMouseMode = source.mouseMode
         synchronizeRemoteScrollGesture()
     }
 
     func acceptRemoteOutput(_ bytes: [UInt8]) {
         feed(byteArray: bytes[...])
         trackAlternateScreen(in: bytes)
-        synchronizeRemoteScrollGesture()
     }
 
     func resetRemoteInteractionState() {
         remoteUsesAlternateScreen = false
         interactionSequenceTail = ""
         let resetModes = Array(
-            "\u{1B}[?47l\u{1B}[?1047l\u{1B}[?1049l\u{1B}[?1000l\u{1B}[?1002l\u{1B}[?1003l\u{1B}[?1006l".utf8
+            "\u{1B}[?47l\u{1B}[?1047l\u{1B}[?1049l\u{1B}[?7h\u{1B}[?1000l\u{1B}[?1002l\u{1B}[?1003l\u{1B}[?1006l".utf8
         )
         feed(byteArray: resetModes[...])
-        synchronizeRemoteScrollGesture()
     }
 
     private func synchronizeRemoteScrollGesture() {
-        let shouldReport = getTerminal().mouseMode != .off
+        let shouldReport = remoteMouseMode != .off
         if shouldReport {
             guard remoteScrollGesture == nil else { return }
             let gesture = UIPanGestureRecognizer(

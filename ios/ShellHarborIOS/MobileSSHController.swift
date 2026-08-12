@@ -308,6 +308,7 @@ final class MobileSSHController {
     }
 
     @ObservationIgnored private var connectionTask: Task<Void, Never>?
+    @ObservationIgnored private var connectionGeneration = UUID()
     @ObservationIgnored private var keepAliveTask: Task<Void, Never>?
     @ObservationIgnored private var client: SSHClient?
     @ObservationIgnored private var jumpClient: SSHClient?
@@ -429,16 +430,39 @@ final class MobileSSHController {
         hasReceivedLiveOutput = false
         lastOutputAt = .now
         state = .connecting
+        let generation = UUID()
+        connectionGeneration = generation
         connectionTask = Task { [weak self] in
             guard let self else { return }
-            do {
-                try await self.runConnection()
-                if !Task.isCancelled { self.state = .disconnected }
-            } catch is CancellationError {
-                self.state = .disconnected
-            } catch {
-                self.state = .failed(Self.safeMessage(for: error))
+            var retry = 0
+            while !Task.isCancelled {
+                do {
+                    try await self.runConnection()
+                    if self.connectionGeneration == generation {
+                        self.state = .disconnected
+                    }
+                    break
+                } catch is CancellationError {
+                    if self.connectionGeneration == generation {
+                        self.state = .disconnected
+                    }
+                    break
+                } catch {
+                    guard self.connectionGeneration == generation else { break }
+                    if retry < 3, Self.isTransientConnectionError(error) {
+                        retry += 1
+                        await self.resetConnectionResourcesForRetry()
+                        self.state = .connecting
+                        do {
+                            try await Task.sleep(for: .seconds(retry))
+                        } catch { break }
+                        continue
+                    }
+                    self.state = .failed(Self.safeMessage(for: error))
+                    break
+                }
             }
+            guard self.connectionGeneration == generation else { return }
             self.writer = nil
             self.keepAliveTask?.cancel()
             self.keepAliveTask = nil
@@ -449,6 +473,7 @@ final class MobileSSHController {
     }
 
     func disconnect() {
+        connectionGeneration = UUID()
         connectionTask?.cancel()
         connectionTask = nil
         restoredInputTask?.cancel()
@@ -1388,5 +1413,31 @@ final class MobileSSHController {
     private static func safeMessage(for error: Error) -> String {
         let message = error.localizedDescription
         return message.isEmpty ? "SSH 连接失败" : message
+    }
+
+    private func resetConnectionResourcesForRetry() async {
+        writer = nil
+        keepAliveTask?.cancel()
+        keepAliveTask = nil
+        moshTransport?.stop()
+        moshTransport = nil
+        let activeClient = client
+        let activeJumpClient = jumpClient
+        client = nil
+        jumpClient = nil
+        try? await activeClient?.close()
+        try? await activeJumpClient?.close()
+    }
+
+    private static func isTransientConnectionError(_ error: Error) -> Bool {
+        if error is CancellationError { return false }
+        let value = String(reflecting: error).lowercased() + " " +
+            error.localizedDescription.lowercased()
+        return [
+            "channelerror", "nioconnectionerror", "ssherror",
+            "connection reset", "connection closed", "timed out",
+            "timeout", "network is unreachable", "not connected",
+            "socket is not connected", "error 0"
+        ].contains { value.contains($0) }
     }
 }

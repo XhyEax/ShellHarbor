@@ -409,7 +409,10 @@ final class TerminalController: ObservableObject {
         else {
             return
         }
-        terminalView.showTerminalFindBar()
+        terminalView.window?.makeFirstResponder(terminalView)
+        DispatchQueue.main.async { [weak terminalView] in
+            terminalView?.showTerminalFindBar()
+        }
     }
 
     func insertText(_ text: String) {

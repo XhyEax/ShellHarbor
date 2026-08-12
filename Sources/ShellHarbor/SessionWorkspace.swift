@@ -264,6 +264,7 @@ final class SessionWorkspace: ObservableObject, Identifiable {
             pendingCommand: snapshot.pendingCommand,
             directory: snapshot.terminalDirectory
         )
+        portForwardRules = snapshot.portForwardRules ?? []
     }
 
     func prepareIfNeeded() {

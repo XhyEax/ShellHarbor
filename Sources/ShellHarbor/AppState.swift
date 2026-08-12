@@ -17,6 +17,8 @@ final class AppState: ObservableObject {
     @Published var showingSessionEditor = false
     @Published var showingLocalSettings = false
     @Published var notice: String?
+    @Published private(set) var globalLocalPathHistory: [String] =
+        UserDefaults.standard.stringArray(forKey: "globalLocalPathHistory") ?? []
     @Published var shcliLinkEnabled = SHCLILinkPreferences.savedEnabled {
         didSet {
             SHCLILinkPreferences.save(enabled: shcliLinkEnabled)
@@ -122,6 +124,16 @@ final class AppState: ObservableObject {
 
     var activeWorkspaces: [SessionWorkspace] {
         activeWorkspaceIDs.compactMap { workspaces[$0] }
+    }
+
+    var globalRecentLocalDirectories: [String] {
+        var seen = Set<String>()
+        let transferDirectories = TransferRecentDirectoryResolver.localDirectories(
+            from: activeWorkspaces.flatMap(\.transfers)
+        )
+        return (globalLocalPathHistory + transferDirectories).filter {
+            seen.insert($0).inserted
+        }
     }
 
     func activeSessionCount(for remoteID: UUID) -> Int {
@@ -1020,7 +1032,8 @@ final class AppState: ObservableObject {
                 terminalDirectory: terminalState.directory,
                 terminalBuffer: terminalState.buffer,
                 pendingCommand: terminalState.pendingCommand,
-                multiplexer: workspace.multiplexer
+                multiplexer: workspace.multiplexer,
+                portForwardRules: workspace.portForwardRules
             )
         }
         SessionRestorationStore.save(
@@ -1108,12 +1121,23 @@ final class AppState: ObservableObject {
 
     private func rememberLocalPath(for workspace: SessionWorkspace) {
         scheduleSessionRestorationSave()
+        let path = workspace.localPath.standardizedFileURL.path
+        globalLocalPathHistory.removeAll { $0 == path }
+        globalLocalPathHistory.insert(path, at: 0)
+        if globalLocalPathHistory.count > 20 {
+            globalLocalPathHistory.removeLast(
+                globalLocalPathHistory.count - 20
+            )
+        }
+        UserDefaults.standard.set(
+            globalLocalPathHistory,
+            forKey: "globalLocalPathHistory"
+        )
         guard let index = sessions.firstIndex(where: {
             $0.id == workspace.remoteID
         }) else {
             return
         }
-        let path = workspace.localPath.standardizedFileURL.path
         guard sessions[index].lastLocalPath != path else { return }
         sessions[index].lastLocalPath = path
         SessionStore.save(sessions)
@@ -1147,6 +1171,10 @@ final class AppState: ObservableObject {
         }
         sessions[index].lastWorkspaceMode = mode.rawValue
         SessionStore.save(sessions)
+    }
+
+    func rememberPortForwardRules() {
+        scheduleSessionRestorationSave()
     }
 
     func rememberFileSort(for workspace: SessionWorkspace) {
@@ -1589,17 +1617,6 @@ final class AppState: ObservableObject {
         in workspace: SessionWorkspace
     ) {
         guard !entries.isEmpty else { return }
-        if remoteDirectory == workspace.remotePath {
-            let existingNames = Set(workspace.remoteEntries.map(\.name))
-            enqueueUploads(
-                entries,
-                remoteDirectory: remoteDirectory,
-                existingNames: existingNames,
-                in: workspace
-            )
-            return
-        }
-
         Task {
             do {
                 let listing = try await RemoteFileService.resolvedListing(
@@ -1687,6 +1704,7 @@ final class AppState: ObservableObject {
             workspace.transfers.lazy
                 .filter {
                     $0.direction == .upload &&
+                    $0.status.reservesDestination &&
                     RemoteFileService.parent(of: $0.destination) ==
                         remoteDirectory
                 }
@@ -1742,7 +1760,10 @@ final class AppState: ObservableObject {
     ) {
         let queuedPaths = Set(
             workspace.transfers.lazy
-                .filter { $0.direction == .download }
+                .filter {
+                    $0.direction == .download &&
+                        $0.status.reservesDestination
+                }
                 .map { $0.destination.lowercased() }
         )
         let resolvedName = FileNameCollisionResolver.uniqueName(

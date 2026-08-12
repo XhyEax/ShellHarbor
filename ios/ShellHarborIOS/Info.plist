@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>ShellHarbor 使用低精度后台定位维持用户主动建立的远程终端连接。</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>ShellHarbor 使用定位权限维持用户主动建立的远程终端连接。</string>
+	<key>UIAppFonts</key>
+	<array>
+		<string>Cascadia Code.ttf</string>
+		<string>DejaVu Sans Mono for Powerline.ttf</string>
+		<string>Fira Code.ttf</string>
+		<string>JetBrains Mono Regular.ttf</string>
+		<string>Meslo LG M DZ Regular for Powerline.ttf</string>
+		<string>Noto Mono for Powerline.ttf</string>
+		<string>PT Mono.ttf</string>
+		<string>Source Code Pro Medium for Powerline.otf</string>
+		<string>Ubuntu Mono derivative Powerline.ttf</string>
+	</array>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>location</string>
+	</array>
+</dict>
+</plist>

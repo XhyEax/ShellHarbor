@@ -86,6 +86,11 @@ struct InteractiveTerminalRepresentable: NSViewRepresentable {
             )
             controller.retainTerminalView(view)
         }
+        // SwiftTerm's Big Sur partial-dirty-region optimization can leave
+        // stale glyphs behind when zsh redraws an editable line across rows.
+        // Prefer correctness for an interactive terminal: the system may
+        // coalesce these invalidations, but it must not preserve old cells.
+        view.disableFullRedrawOnAnyChanges = false
         view.scrollerStyle = .legacy
         view.scrollerControlSize = .small
         view.scrollerKnobStyle = .light
@@ -150,6 +155,7 @@ struct InteractiveTerminalRepresentable: NSViewRepresentable {
         private var lastFontFamily: TerminalFontFamily?
         private var lastFontSize: Double?
         private var isActive = false
+        private var isWaitingForStableLayout = false
 
         init(controller: TerminalController, connectionToken: UUID) {
             self.controller = controller
@@ -226,8 +232,8 @@ struct InteractiveTerminalRepresentable: NSViewRepresentable {
                 let invocation
             else { return }
 
-            startedConnectionToken = connectionToken
             if view.process.running {
+                startedConnectionToken = connectionToken
                 controller.processStarted(for: connectionToken)
                 controller.scheduleRestoredCommandIfNeeded(
                     in: view,
@@ -235,6 +241,24 @@ struct InteractiveTerminalRepresentable: NSViewRepresentable {
                 )
                 return
             }
+            // NSViewRepresentable creates the terminal with a zero frame.
+            // Starting forkpty at that point gives the child a 0-column (or
+            // fallback 80-column) TTY, so a long first prompt is laid out at
+            // a different width from the eventual SwiftUI viewport. Wait for
+            // the same stable size that we are willing to propagate later.
+            guard view.frame.width >= 120, view.frame.height >= 60 else {
+                scheduleSynchronizationAfterLayout(
+                    view: view,
+                    connectionToken: connectionToken,
+                    invocation: invocation,
+                    theme: theme,
+                    fontFamily: fontFamily,
+                    fontSize: fontSize,
+                    isActive: isActive
+                )
+                return
+            }
+            startedConnectionToken = connectionToken
             if let buffer = controller.consumeRestoredTerminalBuffer() {
                 let replay = SessionRestorationStore.replayBuffer(buffer)
                 view.feed(byteArray: Array(replay)[...])
@@ -259,6 +283,33 @@ struct InteractiveTerminalRepresentable: NSViewRepresentable {
                 token: connectionToken
             )
             focusIfActive(view)
+        }
+
+        private func scheduleSynchronizationAfterLayout(
+            view: LocalProcessTerminalView,
+            connectionToken: UUID,
+            invocation: SSHInvocation,
+            theme: TerminalTheme,
+            fontFamily: TerminalFontFamily,
+            fontSize: Double,
+            isActive: Bool
+        ) {
+            guard !isWaitingForStableLayout else { return }
+            isWaitingForStableLayout = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                [weak self, weak view] in
+                guard let self, let view else { return }
+                self.isWaitingForStableLayout = false
+                self.synchronize(
+                    view: view,
+                    connectionToken: connectionToken,
+                    invocation: invocation,
+                    theme: theme,
+                    fontFamily: fontFamily,
+                    fontSize: fontSize,
+                    isActive: isActive
+                )
+            }
         }
 
         private func focusIfActive(_ view: LocalProcessTerminalView) {
@@ -394,13 +445,24 @@ final class SteadyCursorTerminalView: LocalProcessTerminalView {
         super.dataReceived(slice: slice)
         trackAlternateScreen(in: Array(slice))
         restorationController?.terminalOutputDidChange(Array(slice))
+        // Cursor-addressed editors frequently erase one row and repaint a
+        // different row in the same PTY read. SwiftTerm's calculated dirty
+        // range does not cover every old glyph in that case, producing the
+        // scattered characters seen with long zsh prompts. Redraw the visible
+        // surface from the authoritative buffer after each ordered read.
+        setNeedsDisplay(bounds)
     }
 
     func resetRemoteInteractionState() {
         remoteUsesAlternateScreen = false
         interactionSequenceTail = ""
         allowMouseReporting = false
-        feed(text: "\u{1B}[?47l\u{1B}[?1047l\u{1B}[?1049l\u{1B}[?1000l\u{1B}[?1002l\u{1B}[?1003l\u{1B}[?1006l")
+        // Leaving an alternate buffer restores DEC modes saved on entry.
+        // A newly-created SwiftTerm buffer has no prior alternate-screen
+        // entry, so forcing ?1049l can restore its zero-value
+        // savedWraparound and silently disable DECAWM. Re-enable the normal
+        // xterm default after clearing stale restored interaction modes.
+        feed(text: "\u{1B}[?47l\u{1B}[?1047l\u{1B}[?1049l\u{1B}[?7h\u{1B}[?1000l\u{1B}[?1002l\u{1B}[?1003l\u{1B}[?1006l")
     }
 
     private func trackAlternateScreen(in bytes: [UInt8]) {
@@ -646,7 +708,18 @@ private func applyFont(
     to view: LocalProcessTerminalView
 ) {
     let normalizedSize = TerminalFontSizeSettings.normalized(size)
-    view.font = family.nsFont(size: CGFloat(normalizedSize))
+    let desiredFont = family.nsFont(size: CGFloat(normalizedSize))
+    // Assigning TerminalView.font is not a cosmetic no-op: SwiftTerm resets
+    // its font metrics and recomputes the terminal grid. Session restoration
+    // updates can recreate this representable for every PTY read, so applying
+    // the same font repeatedly makes zsh redraw an editable line while the
+    // emulator is being resized/reflowed. Keep the grid stable unless the
+    // user actually changed the font setting.
+    guard
+        view.font.fontName != desiredFont.fontName
+            || abs(view.font.pointSize - desiredFont.pointSize) > 0.01
+    else { return }
+    view.font = desiredFont
 }
 
 private extension SwiftTerm.Color {

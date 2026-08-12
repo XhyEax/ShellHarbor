@@ -1,5 +1,64 @@
 import SwiftUI
 import UniformTypeIdentifiers
+import CoreLocation
+
+@MainActor
+private final class MobileBackgroundLocationKeeper: NSObject,
+    @preconcurrency CLLocationManagerDelegate {
+    private let manager = CLLocationManager()
+    private var wantsTracking = false
+    private(set) var isTrackingLocation = false
+
+    override init() {
+        super.init()
+        manager.delegate = self
+        manager.activityType = .otherNavigation
+        manager.desiredAccuracy = kCLLocationAccuracyThreeKilometers
+        manager.distanceFilter = 1_000
+        manager.pausesLocationUpdatesAutomatically = false
+        manager.allowsBackgroundLocationUpdates = true
+        manager.showsBackgroundLocationIndicator = false
+    }
+
+    func prepareAuthorization() {
+        switch manager.authorizationStatus {
+        case .notDetermined, .authorizedWhenInUse:
+            manager.requestAlwaysAuthorization()
+        case .authorizedAlways, .denied, .restricted:
+            break
+        @unknown default:
+            break
+        }
+    }
+
+    func start() {
+        wantsTracking = true
+        switch manager.authorizationStatus {
+        case .authorizedAlways:
+            manager.startUpdatingLocation()
+            isTrackingLocation = true
+        case .notDetermined:
+            manager.requestAlwaysAuthorization()
+        case .authorizedWhenInUse:
+            manager.requestAlwaysAuthorization()
+        case .denied, .restricted:
+            isTrackingLocation = false
+        @unknown default:
+            isTrackingLocation = false
+        }
+    }
+
+    func stop() {
+        wantsTracking = false
+        manager.stopUpdatingLocation()
+        isTrackingLocation = false
+    }
+
+    func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+        guard wantsTracking else { return }
+        start()
+    }
+}
 
 private extension Color {
     init(shellHarborHex value: String) {
@@ -70,8 +129,12 @@ struct ContentView: View {
     @AppStorage("mobileSelectedRootTab") private var selectedTabRaw =
         IOSRootTab.remotes.rawValue
     @AppStorage("mobileSelectedSessionID") private var selectedSessionID = ""
+    @AppStorage("mobileBackgroundKeepAliveEnabled")
+    private var backgroundKeepAliveEnabled = false
     @State private var requestedSessionID: UUID?
     @State private var suspendedConnectionIDs = Set<UUID>()
+    @State private var backgroundLocationKeeper =
+        MobileBackgroundLocationKeeper()
 
     private var selectedTab: Binding<IOSRootTab> {
         Binding(
@@ -114,6 +177,9 @@ struct ContentView: View {
         .tint(.blue)
         .task {
             remoteStore.restoreSessions(keyStore: keyStore, knownHostStore: knownHostStore)
+            if backgroundKeepAliveEnabled {
+                backgroundLocationKeeper.prepareAuthorization()
+            }
             if IOSRootTab(rawValue: selectedTabRaw) == .sessions,
                let sessionID = UUID(uuidString: selectedSessionID),
                remoteStore.sessions.contains(where: { $0.id == sessionID }) {
@@ -126,17 +192,48 @@ struct ContentView: View {
         }
         .onChange(of: scenePhase) { _, phase in
             if phase != .active {
-                suspendedConnectionIDs = Set(
-                    remoteStore.sessions
-                        .filter(\.controller.hasConnectionIntent)
-                        .map(\.id)
-                )
-                remoteStore.persistSessionRestoration()
+                if suspendedConnectionIDs.isEmpty {
+                    suspendedConnectionIDs = Set(
+                        remoteStore.sessions
+                            .filter(\.controller.hasConnectionIntent)
+                            .map(\.id)
+                    )
+                    remoteStore.persistSessionRestoration()
+                    if backgroundKeepAliveEnabled,
+                       !suspendedConnectionIDs.isEmpty {
+                        backgroundLocationKeeper.start()
+                    }
+                }
             } else {
+                backgroundLocationKeeper.stop()
                 remoteStore.resumeSessionsAfterSuspension(
                     suspendedConnectionIDs
                 )
                 suspendedConnectionIDs.removeAll()
+            }
+        }
+        .onChange(of: remoteStore.sessions.map(\.controller.hasConnectionIntent)) {
+            _, intents in
+            guard backgroundKeepAliveEnabled, intents.contains(true) else {
+                backgroundLocationKeeper.stop()
+                return
+            }
+            if scenePhase == .active {
+                backgroundLocationKeeper.prepareAuthorization()
+            } else {
+                backgroundLocationKeeper.start()
+            }
+        }
+        .onChange(of: backgroundKeepAliveEnabled) { _, enabled in
+            guard enabled else {
+                backgroundLocationKeeper.stop()
+                return
+            }
+            if scenePhase == .active {
+                backgroundLocationKeeper.prepareAuthorization()
+            } else if scenePhase != .active,
+                      !suspendedConnectionIDs.isEmpty {
+                backgroundLocationKeeper.start()
             }
         }
         .task(id: scenePhase) {
@@ -245,113 +342,112 @@ private struct IOSPortForwardView: View {
     var body: some View {
         @Bindable var forwardStore = forwardStore
         NavigationStack {
-            Form {
-                Section("SSH Session") {
-                    if availableSessions.isEmpty {
-                        ContentUnavailableView(
-                            "没有可用的 SSH Session",
-                            systemImage: "terminal",
-                            description: Text("先建立一个 SSH 连接；Mosh Session 不支持 TCP 转发。")
-                        )
-                    } else {
-                        Picker("连接", selection: $forwardStore.selectedSessionID) {
+            List {
+                Section {
+                    Text("本机 IP：\(MobileLocalNetworkAddresses.ipv4.joined(separator: "  "))")
+                        .font(.caption)
+                        .textSelection(.enabled)
+                }
+                ForEach($forwardStore.rules) { $rule in
+                    Section {
+                        Picker("SSH Session", selection: $rule.selectedSessionID) {
                             Text("请选择").tag(UUID?.none)
                             ForEach(availableSessions) { session in
                                 Text(session.displayName).tag(Optional(session.id))
                             }
                         }
-                    }
-                }
-
-                Section("本地监听") {
-                    TextField("监听地址", text: $forwardStore.bindHost)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                    TextField("监听端口", value: $forwardStore.listenPort, format: .number)
+                        TextField("监听地址", text: $rule.bindHost)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                        TextField(
+                            "监听端口",
+                            value: $rule.listenPort,
+                            format: .number.grouping(.never)
+                        )
                         .keyboardType(.numberPad)
-                }
-
-                Section {
-                    TextField("目标地址", text: $forwardStore.targetHost)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                    TextField("目标端口", value: $forwardStore.targetPort, format: .number)
+                        TextField("目标地址", text: $rule.targetHost)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                        TextField(
+                            "目标端口",
+                            value: $rule.targetPort,
+                            format: .number.grouping(.never)
+                        )
                         .keyboardType(.numberPad)
-                } header: {
-                    Text("远程目标")
-                } footer: {
-                    Text("设备本地端口收到的 TCP 连接，将通过选中的 SSH Session 转发到目标地址。")
-                }
-
-                Section("状态") {
-                    HStack {
-                        Circle()
-                            .fill(statusColor)
-                            .frame(width: 8, height: 8)
-                        Text(statusText)
-                            .textSelection(.enabled)
-                        Spacer()
-                    }
-                    if isRunning {
-                        Button("停止转发", role: .destructive) {
-                            forwardStore.stop()
+                        forwardStatus(rule)
+                    } header: {
+                        HStack {
+                            Text("端口转发")
+                            Spacer()
+                            Button(role: .destructive) {
+                                forwardStore.removeRule(rule.id)
+                            } label: { Image(systemName: "trash") }
                         }
-                    } else {
-                        Button("启动转发") { start() }
-                            .disabled(selectedSession == nil || isStarting)
                     }
                 }
             }
             .navigationTitle("端口转发")
-            .onAppear { selectDefaultSessionIfNeeded() }
+            .toolbar {
+                Button { forwardStore.addRule() } label: { Image(systemName: "plus") }
+            }
+            .onAppear { selectDefaultSessionsIfNeeded() }
             .onChange(of: availableSessions.map(\.id)) { _, _ in
-                if selectedSession == nil {
-                    forwardStore.stop()
-                    selectDefaultSessionIfNeeded()
-                }
+                selectDefaultSessionsIfNeeded()
             }
         }
     }
 
-    private var selectedSession: MobileSession? {
-        guard let id = forwardStore.selectedSessionID else { return nil }
+    private func selectedSession(for rule: MobilePortForwardRule) -> MobileSession? {
+        guard let id = rule.selectedSessionID else { return nil }
         return availableSessions.first { $0.id == id }
     }
 
-    private var isRunning: Bool {
-        if case .running = forwardStore.status { return true }
-        return false
+    @ViewBuilder
+    private func forwardStatus(_ rule: MobilePortForwardRule) -> some View {
+        let status = forwardStore.statuses[rule.id] ?? .stopped
+        HStack {
+            Circle().fill(statusColor(status)).frame(width: 8, height: 8)
+            Text(statusText(status, rule: rule)).textSelection(.enabled)
+            Spacer()
+            if case .running = status {
+                Button("停止", role: .destructive) { forwardStore.stop(rule.id) }
+            } else {
+                Button("启动") {
+                    guard let session = selectedSession(for: rule) else { return }
+                    forwardStore.start(rule, using: session)
+                }
+                .disabled(selectedSession(for: rule) == nil || status == .starting)
+            }
+        }
     }
 
-    private var isStarting: Bool { forwardStore.status == .starting }
+    private func selectDefaultSessionsIfNeeded() {
+        guard let first = availableSessions.first?.id else { return }
+        for index in forwardStore.rules.indices
+            where selectedSession(for: forwardStore.rules[index]) == nil {
+            forwardStore.rules[index].selectedSessionID = first
+        }
+    }
 
-    private var statusText: String {
-        switch forwardStore.status {
+    private func statusText(
+        _ status: MobilePortForwardStore.Status,
+        rule: MobilePortForwardRule
+    ) -> String {
+        switch status {
         case .stopped: "未启动"
         case .starting: "正在建立转发"
-        case .running(let port): "正在监听 \(forwardStore.bindHost):\(port)"
+        case .running(let port): "正在监听 \(rule.bindHost):\(port)"
         case .failed(let message): message
         }
     }
 
-    private var statusColor: Color {
-        switch forwardStore.status {
+    private func statusColor(_ status: MobilePortForwardStore.Status) -> Color {
+        switch status {
         case .stopped: .secondary
         case .starting: .orange
         case .running: .green
         case .failed: .red
         }
-    }
-
-    private func selectDefaultSessionIfNeeded() {
-        if selectedSession == nil {
-            forwardStore.selectedSessionID = availableSessions.first?.id
-        }
-    }
-
-    private func start() {
-        guard let selectedSession else { return }
-        forwardStore.start(using: selectedSession)
     }
 }
 
@@ -1361,6 +1457,32 @@ private struct SessionListView: View {
     var body: some View {
         NavigationStack(path: $navigationPath) {
             List {
+                if store.sessions.isEmpty {
+                    ForEach(store.cachedSessionSummaries) { session in
+                        HStack {
+                            Image(systemName: session.iconSymbol)
+                                .foregroundStyle(
+                                    Color(shellHarborHex: session.accentHex)
+                                )
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(session.displayName)
+                                Text(session.endpoint)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                            Spacer()
+                            VStack(alignment: .trailing, spacing: 4) {
+                                ProgressView()
+                                    .controlSize(.small)
+                                Text(session.connectionMethod)
+                                    .font(.caption2.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .accessibilityLabel("\(session.displayName)，正在恢复")
+                    }
+                }
                 ForEach(store.sessions) { session in
                     NavigationLink(value: session.id) {
                         HStack {
@@ -1444,7 +1566,8 @@ private struct SessionListView: View {
                 .onMove(perform: store.moveSessions)
             }
             .overlay {
-                if store.sessions.isEmpty {
+                if store.sessions.isEmpty &&
+                    store.cachedSessionSummaries.isEmpty {
                     ContentUnavailableView(
                         "没有打开的 Session",
                         systemImage: "terminal",
@@ -1474,6 +1597,7 @@ private struct SessionListView: View {
                         },
                         onCloseSession: { closeSession(session.id) }
                     )
+                    .id(session.id)
                 } else {
                     ContentUnavailableView("Session 已关闭", systemImage: "terminal")
                 }
@@ -2246,6 +2370,8 @@ private struct IOSSettingsView: View {
         MobileTerminalFontSizeSettings.defaultSize
     @AppStorage("mobileTerminalTheme") private var terminalTheme = MobileTerminalTheme.night.rawValue
     @AppStorage("mobileTerminalScrollbackLines") private var terminalScrollbackLines = MobileTerminalScrollbackSettings.defaultLines
+    @AppStorage("mobileBackgroundKeepAliveEnabled")
+    private var backgroundKeepAliveEnabled = false
     @State private var terminalScrollbackDraft = ""
 
     private let terminalScrollbackPresets = [
@@ -2258,6 +2384,12 @@ private struct IOSSettingsView: View {
                 Section("平台") {
                     LabeledContent("最低版本", value: "iOS 17")
                     LabeledContent("界面", value: "SwiftUI")
+                }
+                Section("后台") {
+                    Toggle("后台连接保活", isOn: $backgroundKeepAliveEnabled)
+                    Text("默认关闭。开启后，有活动连接时会使用低精度后台定位维持 SSH、Mosh 和 Tailscale 连接；首次开启需要允许始终访问位置。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
                 Section {
                     DisclosureGroup(isExpanded: $areIdentityKeysExpanded) {

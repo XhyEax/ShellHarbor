@@ -286,6 +286,7 @@ struct MobileRemoteProfile: Identifiable, Codable, Equatable, Sendable {
 final class RemoteStore {
     var remotes: [MobileRemoteProfile] = []
     var sessions: [MobileSession] = []
+    private(set) var cachedSessionSummaries: [MobileSessionCacheSummary] = []
     private let tailscaleProxyManager = MobileTailscaleProxyManager.shared
     private let restorationURL: URL
     private var didRestoreSessions = false
@@ -297,6 +298,14 @@ final class RemoteStore {
         restorationURL = support
             .appendingPathComponent("ShellHarbor", isDirectory: true)
             .appendingPathComponent("mobile-session-restoration.json")
+        if let cached = UserDefaults.standard.data(
+            forKey: "mobileSessionCacheSummaries"
+        ), let summaries = try? JSONDecoder().decode(
+            [MobileSessionCacheSummary].self,
+            from: cached
+        ) {
+            cachedSessionSummaries = summaries
+        }
         guard
             let data = UserDefaults.standard.data(forKey: "mobileRemotes"),
             let decoded = try? JSONDecoder().decode(
@@ -622,6 +631,7 @@ final class RemoteStore {
                 session.controller.connect { _ in }
             }
         }
+        updateCachedSessionSummaries()
     }
 
     private func observeRestoration(of session: MobileSession) {
@@ -631,17 +641,28 @@ final class RemoteStore {
     }
 
     func resumeSessionsAfterSuspension(_ sessionIDs: Set<UUID>) {
-        for session in sessions where sessionIDs.contains(session.id) {
-            switch session.controller.state {
-            case .connecting:
-                continue
-            case .connected, .idle, .disconnected, .failed:
-                // iOS can preserve the NIO channel object while suspending its
-                // underlying socket. Recreate the connection after activation
-                // instead of trusting a stale `.connected` state that fails on
-                // the first read with NIOConnectionError.
-                session.controller.reconnect()
+        guard !sessionIDs.isEmpty else { return }
+        Task { [weak self] in
+            // Give cancelled NIO channels time to finish their asynchronous
+            // close before creating replacement channels on the same event
+            // loops. This also lets networking settle after device unlock.
+            do { try await Task.sleep(for: .milliseconds(800)) }
+            catch { return }
+            guard let self else { return }
+            for session in self.sessions where sessionIDs.contains(session.id) {
+                switch session.controller.state {
+                case .connecting, .connected:
+                    continue
+                case .idle, .disconnected, .failed:
+                    session.controller.reconnect()
+                }
             }
+        }
+    }
+
+    func suspendSessions(_ sessionIDs: Set<UUID>) {
+        for session in sessions where sessionIDs.contains(session.id) {
+            session.controller.disconnect()
         }
     }
 
@@ -657,6 +678,11 @@ final class RemoteStore {
     }
 
     func persistSessionRestoration() {
+        // Scene transitions (including permission dialogs during launch) can
+        // arrive before ContentView has restored the previous snapshot. Never
+        // let that transient empty state overwrite the cached Sessions.
+        guard didRestoreSessions else { return }
+        updateCachedSessionSummaries()
         restorationSaveTask?.cancel()
         restorationSaveTask = nil
         let records = sessions.map { session in
@@ -694,6 +720,12 @@ final class RemoteStore {
         } catch {
             // A failed restoration snapshot must not interrupt an active terminal.
         }
+    }
+
+    private func updateCachedSessionSummaries() {
+        cachedSessionSummaries = sessions.map(MobileSessionCacheSummary.init)
+        let data = try? JSONEncoder().encode(cachedSessionSummaries)
+        UserDefaults.standard.set(data, forKey: "mobileSessionCacheSummaries")
     }
 
     private func makeSession(
@@ -743,6 +775,25 @@ final class RemoteStore {
         guard let stored, !stored.isEmpty else { return nil }
         guard MobilePasswordCipher.isEncrypted(stored) else { return stored }
         return try? MobilePasswordCipher.decrypt(stored)
+    }
+}
+
+struct MobileSessionCacheSummary: Codable, Identifiable {
+    let id: UUID
+    let displayName: String
+    let endpoint: String
+    let iconSymbol: String
+    let accentHex: String
+    let connectionMethod: String
+
+    @MainActor
+    init(session: MobileSession) {
+        id = session.id
+        displayName = session.displayName
+        endpoint = session.remote.endpoint
+        iconSymbol = session.remoteIcon.symbol
+        accentHex = session.accentHex
+        connectionMethod = session.remote.connectionMethod.title
     }
 }
 

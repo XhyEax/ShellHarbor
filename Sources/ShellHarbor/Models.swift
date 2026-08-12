@@ -445,6 +445,7 @@ enum TerminalTheme: String, CaseIterable, Identifiable {
 }
 
 enum TerminalFontFamily: String, CaseIterable, Identifiable {
+    case notoMonoForPowerline = "Noto Mono for Powerline"
     case dejaVuSansMono = "DejaVu Sans Mono"
     case ptMono = "PT Mono"
     case sourceCodeProMedium = "Source Code Pro Medium"
@@ -461,15 +462,18 @@ enum TerminalFontFamily: String, CaseIterable, Identifiable {
 
     private var fontNames: [String] {
         switch self {
-        case .dejaVuSansMono: ["DejaVuSansMono", rawValue]
+        case .notoMonoForPowerline:
+            ["NotoMonoForPowerline", "Noto Mono for Powerline", "NotoMono-Regular"]
+        case .dejaVuSansMono: ["DejaVuSansMonoPowerline", "DejaVuSansMono", rawValue]
         case .ptMono: ["PTMono-Regular", rawValue]
-        case .sourceCodeProMedium: ["SourceCodePro-Medium", rawValue]
-        case .ubuntuMono: ["UbuntuMono-Regular", rawValue]
+        case .sourceCodeProMedium: ["SourceCodeProForPowerline-Medium", "SourceCodePro-Medium", rawValue]
+        case .ubuntuMono: ["UbuntuMonoDerivativePowerline-Regular", "UbuntuMono-Regular", rawValue]
         case .courierNew: ["CourierNewPSMT", rawValue]
         case .cascadiaCode: ["CascadiaCode-Regular", rawValue]
         case .firaCode: ["FiraCode-Regular", rawValue]
         case .jetBrainsMono: ["JetBrainsMono-Regular", rawValue]
-        case .meslo: ["MesloLGM-Regular", "MesloLGMDZ-Regular", rawValue]
+        case .meslo:
+            ["MesloLGMDZForPowerline-Regular", "MesloLGM-Regular", "MesloLGMDZ-Regular", rawValue]
         }
     }
 
@@ -1039,6 +1043,15 @@ enum TransferStatus: Equatable {
     case finished
     case failed(String)
     case cancelled
+
+    var reservesDestination: Bool {
+        switch self {
+        case .queued, .running, .paused:
+            true
+        case .finished, .failed, .cancelled:
+            false
+        }
+    }
 
     var label: String {
         switch self {
