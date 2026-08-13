@@ -1503,12 +1503,6 @@ private struct ConnectionBar: View {
                         for: workspace.remoteID
                     )
                 }
-                Button("新建 zellij Session") {
-                    state.launchMultiplexer(
-                        .zellij,
-                        for: workspace.remoteID
-                    )
-                }
                 Divider()
                 Button {
                     state.refreshMultiplexerSessions(
@@ -1530,10 +1524,14 @@ private struct ConnectionBar: View {
             } label: {
                 Label("快速启动", systemImage: "bolt.fill")
             }
-            .disabled(
-                workspace.profile.isLocalConnection ||
-                    !workspace.profile.isConnectable
+            .simultaneousGesture(
+                TapGesture().onEnded {
+                    state.refreshMultiplexerSessions(
+                        for: workspace.remoteID
+                    )
+                }
             )
+            .disabled(!workspace.profile.isConnectable)
             .task(id: workspace.remoteID) {
                 state.refreshMultiplexerSessions(for: workspace.remoteID)
             }

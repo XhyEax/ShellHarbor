@@ -1,20 +1,21 @@
 import Combine
 import Foundation
 
-enum TerminalMultiplexer: String, Codable, CaseIterable {
+enum TerminalMultiplexer: String, Codable {
     case tmux
+    // Decode restoration archives written by older releases without keeping
+    // zellij as a launchable feature.
     case zellij
 
     func startupCommand(sessionName: String) -> String {
         let quoted = SSHCommandBuilder.shellQuote(sessionName)
         switch self {
         case .tmux:
-            // tmux owns the complete history of its alternate screen. Enable
-            // mouse only for this ShellHarbor session so wheel gestures enter
-            // tmux copy-mode without changing the user's global tmux.conf.
-            return "tmux has-session -t \(quoted) 2>/dev/null || tmux new-session -d -s \(quoted); tmux set-option -t \(quoted) mouse on && exec tmux attach-session -t \(quoted)"
+            // Do not exec tmux: detach/exit must return to the original login
+            // shell so the ShellHarbor Session remains interactive.
+            return "tmux has-session -t \(quoted) 2>/dev/null || tmux new-session -d -s \(quoted); tmux set-option -t \(quoted) mouse on && tmux attach-session -t \(quoted)"
         case .zellij:
-            return "zellij attach --create \(quoted)"
+            return ":"
         }
     }
 }
@@ -31,11 +32,6 @@ enum RemoteMultiplexerSessionService {
     tmux_bin=$(command -v tmux 2>/dev/null || true)
     for candidate in /opt/homebrew/bin/tmux /usr/local/bin/tmux /usr/bin/tmux; do [ -n "$tmux_bin" ] || [ ! -x "$candidate" ] || tmux_bin=$candidate; done
     if [ -n "$tmux_bin" ]; then "$tmux_bin" list-sessions -F '__SHELLHARBOR_TMUX__#{session_name}' 2>/dev/null || true; fi
-    zellij_bin=$(command -v zellij 2>/dev/null || true)
-    for candidate in /opt/homebrew/bin/zellij /usr/local/bin/zellij "$HOME/.cargo/bin/zellij"; do [ -n "$zellij_bin" ] || [ ! -x "$candidate" ] || zellij_bin=$candidate; done
-    if [ -n "$zellij_bin" ]; then
-      { "$zellij_bin" list-sessions --short --no-formatting 2>/dev/null || "$zellij_bin" list-sessions --short 2>/dev/null || true; } | sed 's/^/__SHELLHARBOR_ZELLIJ__/'
-    fi
     """
 
     static func parse(_ output: String) -> [RemoteMultiplexerSession] {
@@ -48,13 +44,6 @@ enum RemoteMultiplexerSessionService {
                 item = RemoteMultiplexerSession(
                     multiplexer: .tmux,
                     name: String(value.dropFirst("__SHELLHARBOR_TMUX__".count))
-                        .replacingOccurrences(of: "\\t", with: "")
-                        .trimmingCharacters(in: .whitespacesAndNewlines)
-                )
-            } else if value.hasPrefix("__SHELLHARBOR_ZELLIJ__") {
-                item = RemoteMultiplexerSession(
-                    multiplexer: .zellij,
-                    name: String(value.dropFirst("__SHELLHARBOR_ZELLIJ__".count))
                         .replacingOccurrences(of: "\\t", with: "")
                         .trimmingCharacters(in: .whitespacesAndNewlines)
                 )
@@ -231,11 +220,12 @@ final class SessionWorkspace: ObservableObject, Identifiable {
     }
 
     /// Quick launch is a one-shot connection bootstrap. Reconnecting the same
-    /// workspace must not inject the tmux/zellij command into the new shell.
+    /// workspace must not inject the tmux command into the new shell.
     func consumeMultiplexerStartupCommand() -> String? {
         guard
             !hasIssuedMultiplexerStartup,
-            let multiplexer
+            let multiplexer,
+            multiplexer == .tmux
         else { return nil }
         hasIssuedMultiplexerStartup = true
         return multiplexer.startupCommand(sessionName: sessionLabel)

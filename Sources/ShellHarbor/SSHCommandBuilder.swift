@@ -146,7 +146,8 @@ enum SSHCommandBuilder {
 
     static func localShell(
         _ shell: LocalShell,
-        startingDirectory: String? = nil
+        startingDirectory: String? = nil,
+        startupCommand: String? = nil
     ) -> SSHInvocation {
         let executable = shell.resolvedPath
         var environment = ProcessInfo.processInfo.environment
@@ -170,16 +171,33 @@ enum SSHCommandBuilder {
                 ? directory
                 : FileManager.default.homeDirectoryForCurrentUser.path
         environment["PWD"] = usableDirectory
+        var arguments = ["-C", usableDirectory, executable, "-l"]
+        if let startupCommand,
+           !startupCommand.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            arguments += [
+                "-c",
+                "\(startupCommand); exec \(shellQuote(executable)) -l"
+            ]
+        }
         return SSHInvocation(
             // `env -C` changes directory in the child immediately before it
             // execs the selected login shell. This avoids relying on
             // forkpty's inherited cwd, which can remain the app's `/` even
             // when the requested directory and PWD are correct.
             executableURL: URL(fileURLWithPath: "/usr/bin/env"),
-            arguments: ["-C", usableDirectory, executable, "-l"],
+            arguments: arguments,
             environment: environment,
             displayCommand: "\(shell.shellName) -l",
             currentDirectory: usableDirectory
+        )
+    }
+
+    static func localCommand(_ command: String) -> SSHInvocation {
+        SSHInvocation(
+            executableURL: URL(fileURLWithPath: "/bin/sh"),
+            arguments: ["-lc", command],
+            environment: ProcessInfo.processInfo.environment,
+            displayCommand: "/bin/sh -lc <command>"
         )
     }
 

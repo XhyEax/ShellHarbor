@@ -509,13 +509,16 @@ public final class Buffer {
             }
         }
         
-        // DEBUG: Post-condition
+        // Reflow can leave a partially populated circular-buffer row shorter
+        // than the new grid width (notably when the iOS keyboard changes the
+        // viewport while a large restored buffer is present). Repair that row
+        // instead of aborting the host application. BufferLine.resize fills
+        // only missing cells and preserves all existing terminal contents.
         if lines.count > 0 {
             for i in 0..<lines.maxLength {
                 let line = lines [i]
                 if line.count < newCols {
-                    print ("stop here newCols=\(newCols) but the element has: \(line.count)")
-                    abort ()
+                    line.resize(cols: newCols, fillData: CharData.Null)
                 }
             }
         }

@@ -278,7 +278,8 @@ final class TerminalController: ObservableObject {
                 processDescription = "Shell"
                 newInvocation = SSHCommandBuilder.localShell(
                     profile.resolvedLocalShell,
-                    startingDirectory: directoryTracker.currentDirectory
+                    startingDirectory: directoryTracker.currentDirectory,
+                    startupCommand: startupCommand
                 )
             } else if profile.isMoshConnection {
                 processDescription = "Mosh"

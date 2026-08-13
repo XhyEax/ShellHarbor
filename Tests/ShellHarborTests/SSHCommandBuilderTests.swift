@@ -478,10 +478,11 @@ final class SSHCommandBuilderTests: XCTestCase {
 
         XCTAssertTrue(command.contains("tmux set-option -t 'review' mouse on"))
         XCTAssertFalse(command.contains("set-option -g"))
-        XCTAssertTrue(command.contains("exec tmux attach-session -t 'review'"))
+        XCTAssertTrue(command.contains("tmux attach-session -t 'review'"))
+        XCTAssertFalse(command.contains("exec tmux"))
     }
 
-    func testRemoteMultiplexerSessionListingParsesTmuxAndZellij() {
+    func testRemoteMultiplexerSessionListingParsesTmuxOnly() {
         let sessions = RemoteMultiplexerSessionService.parse(
             """
             __SHELLHARBOR_TMUX__\twork
@@ -494,8 +495,7 @@ final class SSHCommandBuilderTests: XCTestCase {
         XCTAssertEqual(
             sessions,
             [
-                RemoteMultiplexerSession(multiplexer: .tmux, name: "work"),
-                RemoteMultiplexerSession(multiplexer: .zellij, name: "dev")
+                RemoteMultiplexerSession(multiplexer: .tmux, name: "work")
             ]
         )
     }

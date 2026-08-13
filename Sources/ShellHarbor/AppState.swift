@@ -830,10 +830,10 @@ final class AppState: ObservableObject {
         for remoteID: UUID,
         sessionName: String? = nil
     ) {
-        guard
-            remoteID != localRemoteID,
-            let profile = sessions.first(where: { $0.id == remoteID })
-        else { return }
+        let profile = remoteID == localRemoteID
+            ? localProfile
+            : sessions.first(where: { $0.id == remoteID })
+        guard let profile else { return }
         selectSession(remoteID)
         openWorkspace(
             profile: profile,
@@ -843,11 +843,11 @@ final class AppState: ObservableObject {
     }
 
     func refreshMultiplexerSessions(for remoteID: UUID) {
-        guard
-            remoteID != localRemoteID,
-            !loadingMultiplexerRemoteIDs.contains(remoteID),
-            let storedProfile = sessions.first(where: { $0.id == remoteID })
-        else { return }
+        guard !loadingMultiplexerRemoteIDs.contains(remoteID) else { return }
+        let resolvedProfile = remoteID == localRemoteID
+            ? localProfile
+            : sessions.first(where: { $0.id == remoteID })
+        guard let storedProfile = resolvedProfile else { return }
         loadingMultiplexerRemoteIDs.insert(remoteID)
         Task { [weak self] in
             guard let self else { return }
@@ -863,13 +863,19 @@ final class AppState: ObservableObject {
                 } else if let port = try await tailscaleProxyManager.ensureRunning(for: profile) {
                     profile.proxyPort = port
                 }
-                let invocation = try SSHCommandBuilder.ssh(
-                    profile: profile,
-                    jumpProfile: jumpProfile,
-                    command: RemoteMultiplexerSessionService.listingCommand,
-                    connectionTimeoutSeconds: 8,
-                    batchMode: true
-                )
+                let invocation = if profile.isLocalConnection {
+                    SSHCommandBuilder.localCommand(
+                        RemoteMultiplexerSessionService.listingCommand
+                    )
+                } else {
+                    try SSHCommandBuilder.ssh(
+                        profile: profile,
+                        jumpProfile: jumpProfile,
+                        command: RemoteMultiplexerSessionService.listingCommand,
+                        connectionTimeoutSeconds: 8,
+                        batchMode: true
+                    )
+                }
                 let result = try await CommandRunner.run(invocation)
                 remoteMultiplexerSessions[remoteID] =
                     RemoteMultiplexerSessionService.parse(result.output)

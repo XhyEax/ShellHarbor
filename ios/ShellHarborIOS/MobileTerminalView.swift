@@ -132,19 +132,32 @@ private struct MobileTerminalPalette {
 }
 
 private final class MobileTerminalNativeView: TerminalView, UIGestureRecognizerDelegate {
+    private static let outputChunkSize = 16 * 1024
     private let hiddenKeyboardView = UIView(frame: .zero)
     private var remoteScrollGesture: UIPanGestureRecognizer?
     private var remoteMouseMode: SwiftTerm.Terminal.MouseMode = .off
     private var remoteUsesAlternateScreen = false
     private var interactionSequenceTail = ""
+    private var pendingOutput: [UInt8] = []
+    private var pendingOutputOffset = 0
+    private var outputDrainTask: Task<Void, Never>?
+    private var hasStableTerminalSize = false
+
+    deinit {
+        outputDrainTask?.cancel()
+    }
 
     override func layoutSubviews() {
         // SwiftUI briefly gives a retained terminal an almost-zero frame when
         // navigating away or switching workspace modes. Letting SwiftTerm
         // process that transient layout permanently reflows its grid to only
         // a few columns before the real frame returns.
-        guard bounds.width >= 120, bounds.height >= 60 else { return }
+        guard bounds.width.isFinite, bounds.height.isFinite,
+              bounds.width >= 120, bounds.height >= 60,
+              bounds.width <= 10_000, bounds.height <= 10_000 else { return }
         super.layoutSubviews()
+        hasStableTerminalSize = true
+        scheduleOutputDrain()
     }
 
     override func mouseModeChanged(source: SwiftTerm.Terminal) {
@@ -153,8 +166,8 @@ private final class MobileTerminalNativeView: TerminalView, UIGestureRecognizerD
     }
 
     func acceptRemoteOutput(_ bytes: [UInt8]) {
-        feed(byteArray: bytes[...])
-        trackAlternateScreen(in: bytes)
+        pendingOutput.append(contentsOf: bytes)
+        scheduleOutputDrain()
     }
 
     func resetRemoteInteractionState() {
@@ -163,7 +176,39 @@ private final class MobileTerminalNativeView: TerminalView, UIGestureRecognizerD
         let resetModes = Array(
             "\u{1B}[?47l\u{1B}[?1047l\u{1B}[?1049l\u{1B}[?7h\u{1B}[?1000l\u{1B}[?1002l\u{1B}[?1003l\u{1B}[?1006l".utf8
         )
-        feed(byteArray: resetModes[...])
+        pendingOutput.append(contentsOf: resetModes)
+        scheduleOutputDrain()
+    }
+
+    private func scheduleOutputDrain() {
+        guard hasStableTerminalSize, outputDrainTask == nil,
+              pendingOutputOffset < pendingOutput.count else { return }
+        outputDrainTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled, self.pendingOutputOffset < self.pendingOutput.count {
+                let end = min(
+                    self.pendingOutputOffset + Self.outputChunkSize,
+                    self.pendingOutput.count
+                )
+                let chunk = Array(self.pendingOutput[self.pendingOutputOffset..<end])
+                self.pendingOutputOffset = end
+                self.feed(byteArray: chunk[...])
+                self.trackAlternateScreen(in: chunk)
+
+                // Replaying a multi-megabyte restoration snapshot in one main-
+                // actor turn can trip the iOS scene watchdog. Give layout and
+                // lifecycle events a chance to run between parser chunks.
+                await Task.yield()
+            }
+            guard !Task.isCancelled else { return }
+            self.pendingOutput.removeAll(keepingCapacity: true)
+            self.pendingOutputOffset = 0
+            self.outputDrainTask = nil
+
+            // Output can be appended after the loop condition but before the
+            // task is cleared because all work is main-actor serialized.
+            self.scheduleOutputDrain()
+        }
     }
 
     private func synchronizeRemoteScrollGesture() {

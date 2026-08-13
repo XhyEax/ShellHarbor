@@ -102,20 +102,55 @@ private enum IOSRootTab: String, Hashable {
 
 private enum MobileTerminalMultiplexer: String, CaseIterable, Identifiable {
     case tmux
-    case zellij
 
     var id: String { rawValue }
     var title: String { rawValue }
 
-    func launch() -> (command: String, suffix: String) {
-        let suffix = "\(rawValue)-\(String(UUID().uuidString.prefix(6)).lowercased())"
-        let sessionName = "shellharbor-\(suffix)"
-        let command = switch self {
-        case .tmux:
-            "tmux has-session -t \(sessionName) 2>/dev/null || tmux new-session -d -s \(sessionName); tmux set-option -t \(sessionName) mouse on && exec tmux attach-session -t \(sessionName)"
-        case .zellij: "zellij attach --create \(sessionName)"
+    func launch(sessionName existingName: String? = nil) -> (command: String, suffix: String) {
+        let generatedSuffix = "\(rawValue)-\(String(UUID().uuidString.prefix(6)).lowercased())"
+        let sessionName = existingName ?? "shellharbor-\(generatedSuffix)"
+        let quoted = "'" + sessionName.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        // Keep the login shell alive so detaching from or exiting tmux does
+        // not strand the iOS Session in a terminated PTY.
+        let command = "tmux has-session -t \(quoted) 2>/dev/null || tmux new-session -d -s \(quoted); tmux set-option -t \(quoted) mouse on && tmux attach-session -t \(quoted)"
+        return (command, existingName ?? generatedSuffix)
+    }
+
+    static let listingCommand = """
+    PATH="$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+    tmux_bin=$(command -v tmux 2>/dev/null || true)
+    for candidate in /opt/homebrew/bin/tmux /usr/local/bin/tmux /usr/bin/tmux "$HOME/.local/bin/tmux"; do
+      [ -n "$tmux_bin" ] || [ ! -x "$candidate" ] || tmux_bin=$candidate
+    done
+    if [ -z "$tmux_bin" ]; then
+      printf '%s\n' '__SHELLHARBOR_TMUX_ERROR__tmux command not found in non-interactive SSH environment'
+    else
+      "$tmux_bin" list-sessions -F '__SHELLHARBOR_TMUX__#{session_name}' 2>&1 || status=$?
+      if [ "${status:-0}" -ne 0 ]; then
+        printf '%s%s\n' '__SHELLHARBOR_TMUX_ERROR__' 'tmux list-sessions failed'
+      fi
+    fi
+    """
+
+    static func parseSessions(_ output: String) -> [String] {
+        let prefix = "__SHELLHARBOR_TMUX__"
+        var seen = Set<String>()
+        return output.split(whereSeparator: \Character.isNewline).compactMap { line in
+            let value = String(line)
+            guard value.hasPrefix(prefix) else { return nil }
+            let name = String(value.dropFirst(prefix.count))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !name.isEmpty, seen.insert(name).inserted else { return nil }
+            return name
         }
-        return (command, suffix)
+    }
+
+    static func parseError(_ output: String) -> String? {
+        let prefix = "__SHELLHARBOR_TMUX_ERROR__"
+        return output.split(whereSeparator: \Character.isNewline)
+            .map(String.init)
+            .first(where: { $0.hasPrefix(prefix) })
+            .map { String($0.dropFirst(prefix.count)) }
     }
 }
 
@@ -1590,6 +1625,11 @@ private struct SessionListView: View {
                                 ?? session.remote
                             openMultiplexer(source, multiplexer: multiplexer)
                         },
+                        onAttachTmuxSession: { name in
+                            let source = store.remotes.first(where: { $0.id == session.remote.id })
+                                ?? session.remote
+                            openMultiplexer(source, multiplexer: .tmux, sessionName: name)
+                        },
                         onEditRemote: {
                             editingRemote = store.remotes.first(where: {
                                 $0.id == session.remote.id
@@ -1626,16 +1666,13 @@ private struct SessionListView: View {
                         }
                     } label: {
                         Image(systemName: "plus")
-                    } primaryAction: {
-                        guard let remote = currentRemoteForNewSession else { return }
-                        open(remote)
                     }
                     .disabled(store.remotes.isEmpty)
                     .accessibilityLabel("新建 Session")
                     .accessibilityHint(
                         currentRemoteForNewSession.map {
-                            "点击新建 \($0.name) Session，长按选择其他 Remote"
-                        } ?? "长按选择 Remote"
+                            "点击选择 Remote，并新建 \($0.name) 或 tmux Session"
+                        } ?? "点击选择 Remote"
                     )
                 }
             }
@@ -1728,9 +1765,10 @@ private struct SessionListView: View {
 
     private func openMultiplexer(
         _ remote: MobileRemoteProfile,
-        multiplexer: MobileTerminalMultiplexer
+        multiplexer: MobileTerminalMultiplexer,
+        sessionName: String? = nil
     ) {
-        let launch = multiplexer.launch()
+        let launch = multiplexer.launch(sessionName: sessionName)
         open(remote, startupCommand: launch.command, nameSuffix: launch.suffix)
     }
 }
@@ -1742,6 +1780,7 @@ private struct MobileTerminalSessionView: View {
     let session: MobileSession
     let onNewSession: () -> Void
     let onNewMultiplexerSession: (MobileTerminalMultiplexer) -> Void
+    let onAttachTmuxSession: (String) -> Void
     let onEditRemote: () -> Void
     let onCloseSession: () -> Void
     @State private var showingCommandHistory = false
@@ -1750,6 +1789,9 @@ private struct MobileTerminalSessionView: View {
     @State private var terminalSearchText = ""
     @FocusState private var terminalSearchFocused: Bool
     @State private var commandToken = UUID()
+    @State private var tmuxSessions: [String] = []
+    @State private var loadingTmuxSessions = false
+    @State private var tmuxRefreshError: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1871,6 +1913,19 @@ private struct MobileTerminalSessionView: View {
                         onNewSession()
                     }
                     Divider()
+                    if !tmuxSessions.isEmpty {
+                        Section("已有 tmux 会话") {
+                            ForEach(tmuxSessions, id: \.self) { name in
+                                Button(name, systemImage: "rectangle.on.rectangle") {
+                                    onAttachTmuxSession(name)
+                                }
+                            }
+                        }
+                        Divider()
+                    }
+                    if let tmuxRefreshError {
+                        Text(tmuxRefreshError)
+                    }
                     ForEach(MobileTerminalMultiplexer.allCases) { multiplexer in
                         Button(
                             "新建 \(multiplexer.title) Session",
@@ -1879,13 +1934,25 @@ private struct MobileTerminalSessionView: View {
                             onNewMultiplexerSession(multiplexer)
                         }
                     }
+                    Button(
+                        loadingTmuxSessions ? "正在识别…" : "刷新已有 tmux 会话",
+                        systemImage: "arrow.clockwise"
+                    ) {
+                        Task { await refreshTmuxSessions() }
+                    }
+                    .disabled(
+                        loadingTmuxSessions || session.controller.state != .connected
+                    )
                 } label: {
                     Image(systemName: "plus")
-                } primaryAction: {
-                    onNewSession()
                 }
+                .simultaneousGesture(
+                    TapGesture().onEnded {
+                        Task { await refreshTmuxSessions() }
+                    }
+                )
                 .accessibilityLabel("新建 Session")
-                .accessibilityHint("点击新建同 Remote Session，长按显示快速启动与编辑")
+                .accessibilityHint("点击显示新建 Session 与 tmux 快速启动")
             }
             ToolbarItem(placement: .topBarTrailing) {
                 Button { onCloseSession() } label: {
@@ -1895,7 +1962,10 @@ private struct MobileTerminalSessionView: View {
             }
         }
         .onDisappear { store.persistSessionRestoration() }
-        .onAppear { registerAppCommands() }
+        .onAppear {
+            registerAppCommands()
+            Task { await refreshTmuxSessions() }
+        }
         .onDisappear { commandRouter.unregister(token: commandToken) }
         .onChange(of: session.selectedView) { _, view in
             guard !view.showsTerminal else { return }
@@ -1905,6 +1975,9 @@ private struct MobileTerminalSessionView: View {
         }
         .onChange(of: session.controller.state) { _, state in
             registerAppCommands()
+            if state == .connected {
+                Task { await refreshTmuxSessions() }
+            }
             guard state == .connected,
                   store.remotes.first(where: { $0.id == session.remote.id })?.inspectionEnabled == true
             else { return }
@@ -1926,6 +1999,23 @@ private struct MobileTerminalSessionView: View {
                 primaryButton: .default(Text("信任并连接")) { session.controller.acceptHostKey() },
                 secondaryButton: .cancel(Text("取消")) { session.controller.rejectHostKey() }
             )
+        }
+    }
+
+    private func refreshTmuxSessions() async {
+        guard session.controller.state == .connected,
+              !loadingTmuxSessions else { return }
+        loadingTmuxSessions = true
+        defer { loadingTmuxSessions = false }
+        do {
+            let output = try await session.controller.executeInspectionCommand(
+                MobileTerminalMultiplexer.listingCommand
+            )
+            tmuxSessions = MobileTerminalMultiplexer.parseSessions(output)
+            tmuxRefreshError = MobileTerminalMultiplexer.parseError(output)
+        } catch {
+            tmuxSessions = []
+            tmuxRefreshError = error.localizedDescription
         }
     }
 
