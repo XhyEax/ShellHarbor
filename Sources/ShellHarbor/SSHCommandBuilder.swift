@@ -493,7 +493,7 @@ enum SSHCommandBuilder {
         }
         let launch: String
         if let requestedStartup, !requestedStartup.isEmpty {
-            launch = "exec /bin/sh -lc \(shellQuote(requestedStartup))"
+            launch = "exec \"${SHELL:-$0}\" -lc \(shellQuote(requestedStartup))"
         } else {
             launch = "exec \"${SHELL:-$0}\" -l"
         }

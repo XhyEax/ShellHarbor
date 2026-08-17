@@ -92,6 +92,13 @@ final class MobileSFTPBrowser {
         let size: Int64
     }
 
+    struct UploadCollisionRequest: Identifiable {
+        let id = UUID()
+        let files: [MobileLocalFile]
+        let cleanupRoot: URL?
+        let conflictingNames: [String]
+    }
+
     var currentPath = "."
     var pathInput = "."
     var focusedPath: String?
@@ -100,6 +107,7 @@ final class MobileSFTPBrowser {
     var errorMessage: String?
     var preview: MobileFilePreview?
     var transfers: [MobileTransfer] = []
+    var uploadCollisionRequest: UploadCollisionRequest?
     private(set) var sortField: MobileFileSortField
     private(set) var sortAscending: Bool
 
@@ -333,6 +341,41 @@ final class MobileSFTPBrowser {
 
     func upload(localFiles: [MobileLocalFile], cleanupRoot: URL? = nil) {
         guard !localFiles.isEmpty else { return }
+        let existingNames = Set(entries.map(\.name))
+        let conflicts = localFiles.map(\.name).filter(existingNames.contains)
+        if !conflicts.isEmpty {
+            uploadCollisionRequest = UploadCollisionRequest(
+                files: localFiles,
+                cleanupRoot: cleanupRoot,
+                conflictingNames: conflicts
+            )
+            return
+        }
+        startUpload(localFiles: localFiles, cleanupRoot: cleanupRoot, overwrite: false)
+    }
+
+    func resolveUploadCollision(overwrite: Bool) {
+        guard let request = uploadCollisionRequest else { return }
+        uploadCollisionRequest = nil
+        startUpload(
+            localFiles: request.files,
+            cleanupRoot: request.cleanupRoot,
+            overwrite: overwrite
+        )
+    }
+
+    func cancelUploadCollision() {
+        if let cleanupRoot = uploadCollisionRequest?.cleanupRoot {
+            try? FileManager.default.removeItem(at: cleanupRoot)
+        }
+        uploadCollisionRequest = nil
+    }
+
+    private func startUpload(
+        localFiles: [MobileLocalFile],
+        cleanupRoot: URL?,
+        overwrite: Bool
+    ) {
         let id = beginTransfer(
             name: localFiles.count == 1 ? localFiles[0].name : "上传 \(localFiles.count) 个项目",
             direction: .upload,
@@ -366,11 +409,13 @@ final class MobileSFTPBrowser {
                 var completed: Int64 = 0
                 var reservedNames = Set(entries.map(\.name))
                 for source in localFiles {
-                    let rootName = collisionFreeRemoteName(
-                        source.name,
-                        isDirectory: source.isDirectory,
-                        reserved: reservedNames
-                    )
+                    let rootName = overwrite
+                        ? source.name
+                        : collisionFreeRemoteName(
+                            source.name,
+                            isDirectory: source.isDirectory,
+                            reserved: reservedNames
+                        )
                     reservedNames.insert(rootName)
                     let remoteRoot = joined(rootName)
                     for try await entry in Self.localManifestStream(for: source) {

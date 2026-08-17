@@ -194,6 +194,39 @@ final class ShellHarborCLIKitTests: XCTestCase {
         XCTAssertEqual(transfer.remotePath, "~/incoming/file.txt")
     }
 
+    func testSCPRecognizesAmbiguousExistingLocalEndpoints() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = directory.appendingPathComponent("from.txt")
+        let destination = directory.appendingPathComponent("to.txt")
+        try Data().write(to: source)
+        try Data().write(to: destination)
+
+        XCTAssertTrue(
+            SHSCPTransfer.bothEndpointsExistLocally(
+                from: source.path,
+                to: destination.path
+            )
+        )
+        XCTAssertEqual(
+            SHSCPTransfer.make(
+                from: source.path,
+                to: destination.path,
+                direction: .download
+            ),
+            SHSCPTransfer(
+                localPath: directory.appendingPathComponent("to (1).txt").path,
+                remotePath: source.path,
+                direction: .download
+            )
+        )
+    }
+
     func testSCPDetectsMissingSourceAsRemoteDownload() {
         let transfer = SHSCPTransfer.detect(
             from: "/remote/missing/file.txt",
@@ -203,7 +236,8 @@ final class ShellHarborCLIKitTests: XCTestCase {
         XCTAssertEqual(transfer.direction, .download)
         XCTAssertEqual(
             transfer.localPath,
-            NSString(string: "~/Downloads").expandingTildeInPath
+            (NSString(string: "~/Downloads").expandingTildeInPath as NSString)
+                .appendingPathComponent("file.txt")
         )
         XCTAssertEqual(transfer.remotePath, "/remote/missing/file.txt")
     }

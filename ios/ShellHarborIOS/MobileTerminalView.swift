@@ -132,7 +132,8 @@ private struct MobileTerminalPalette {
 }
 
 private final class MobileTerminalNativeView: TerminalView, UIGestureRecognizerDelegate {
-    private static let outputChunkSize = 16 * 1024
+    private static let outputChunkSize = 256 * 1024
+    private static let outputYieldInterval = 4
     private let hiddenKeyboardView = UIView(frame: .zero)
     private var remoteScrollGesture: UIPanGestureRecognizer?
     private var remoteMouseMode: SwiftTerm.Terminal.MouseMode = .off
@@ -142,6 +143,7 @@ private final class MobileTerminalNativeView: TerminalView, UIGestureRecognizerD
     private var pendingOutputOffset = 0
     private var outputDrainTask: Task<Void, Never>?
     private var hasStableTerminalSize = false
+    private var lastTerminalLayoutSize = CGSize.zero
 
     deinit {
         outputDrainTask?.cancel()
@@ -155,9 +157,29 @@ private final class MobileTerminalNativeView: TerminalView, UIGestureRecognizerD
         guard bounds.width.isFinite, bounds.height.isFinite,
               bounds.width >= 120, bounds.height >= 60,
               bounds.width <= 10_000, bounds.height <= 10_000 else { return }
+        // Showing/hiding the software keyboard changes only the available
+        // height. Keep the existing terminal grid and let UIKit clip/reveal
+        // it instead of reflowing the entire scrollback on every transition.
+        if hasStableTerminalSize,
+           abs(bounds.width - lastTerminalLayoutSize.width) < 1,
+           abs(bounds.height - lastTerminalLayoutSize.height) >= 1 {
+            if bounds.height < lastTerminalLayoutSize.height {
+                revealBottomForCurrentViewport()
+            }
+            setNeedsDisplay(bounds)
+            return
+        }
         super.layoutSubviews()
+        lastTerminalLayoutSize = bounds.size
         hasStableTerminalSize = true
         scheduleOutputDrain()
+    }
+
+    func revealBottomForCurrentViewport() {
+        // Keyboard-only height changes intentionally do not resize the grid.
+        // Reveal the last row containing text, rather than the physical end of
+        // the grid, so trailing blank rows are not pulled into view.
+        revealLastContentLine(viewportHeight: bounds.height)
     }
 
     override func mouseModeChanged(source: SwiftTerm.Terminal) {
@@ -185,6 +207,7 @@ private final class MobileTerminalNativeView: TerminalView, UIGestureRecognizerD
               pendingOutputOffset < pendingOutput.count else { return }
         outputDrainTask = Task { @MainActor [weak self] in
             guard let self else { return }
+            var chunksSinceYield = 0
             while !Task.isCancelled, self.pendingOutputOffset < self.pendingOutput.count {
                 let end = min(
                     self.pendingOutputOffset + Self.outputChunkSize,
@@ -194,11 +217,16 @@ private final class MobileTerminalNativeView: TerminalView, UIGestureRecognizerD
                 self.pendingOutputOffset = end
                 self.feed(byteArray: chunk[...])
                 self.trackAlternateScreen(in: chunk)
+                chunksSinceYield += 1
 
                 // Replaying a multi-megabyte restoration snapshot in one main-
                 // actor turn can trip the iOS scene watchdog. Give layout and
-                // lifecycle events a chance to run between parser chunks.
-                await Task.yield()
+                // lifecycle events a chance after each megabyte, while avoiding
+                // hundreds of redraw cycles before reaching recent output.
+                if chunksSinceYield >= Self.outputYieldInterval {
+                    chunksSinceYield = 0
+                    await Task.yield()
+                }
             }
             guard !Task.isCancelled else { return }
             self.pendingOutput.removeAll(keepingCapacity: true)
@@ -221,6 +249,7 @@ private final class MobileTerminalNativeView: TerminalView, UIGestureRecognizerD
             )
             gesture.delegate = self
             gesture.maximumNumberOfTouches = 1
+            gesture.cancelsTouchesInView = true
             addGestureRecognizer(gesture)
             remoteScrollGesture = gesture
         } else if let remoteScrollGesture {
@@ -270,7 +299,8 @@ private final class MobileTerminalNativeView: TerminalView, UIGestureRecognizerD
         _ gestureRecognizer: UIGestureRecognizer,
         shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
     ) -> Bool {
-        true
+        gestureRecognizer !== remoteScrollGesture &&
+            otherGestureRecognizer !== remoteScrollGesture
     }
 
     override func becomeFirstResponder() -> Bool {
@@ -310,6 +340,7 @@ struct MobileTerminalView: UIViewRepresentable {
         context.coordinator.appearance = appearance
         view.terminalDelegate = context.coordinator
         context.coordinator.terminal = view
+        context.coordinator.startObservingKeyboard()
         context.coordinator.lastClearRequestID = controller.clearRequestID
         context.coordinator.lastSearchRequestID = controller.searchRequestID
         context.coordinator.lastKeyboardToggleRequestID = controller.keyboardToggleRequestID
@@ -367,6 +398,7 @@ struct MobileTerminalView: UIViewRepresentable {
     }
 
     static func dismantleUIView(_ uiView: TerminalView, coordinator: Coordinator) {
+        coordinator.stopObservingKeyboard()
         coordinator.terminal = nil
     }
 
@@ -408,9 +440,39 @@ struct MobileTerminalView: UIViewRepresentable {
         var lastSearchRequestID: UUID?
         var lastKeyboardToggleRequestID: UUID?
         fileprivate var appearance: Appearance?
+        private var keyboardDidShowObserver: NSObjectProtocol?
 
         init(controller: MobileSSHController) {
             self.controller = controller
+        }
+
+        func startObservingKeyboard() {
+            guard keyboardDidShowObserver == nil else { return }
+            keyboardDidShowObserver = NotificationCenter.default.addObserver(
+                forName: UIResponder.keyboardDidShowNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    guard let terminal = self?.terminal,
+                          terminal.window != nil,
+                          terminal.isFirstResponder else { return }
+                    // Keyboard presentation changes only the clipped viewport;
+                    // keep the terminal grid intact and reveal its current input
+                    // line by moving the local scrollback viewport to the end.
+                    if let nativeTerminal = terminal as? MobileTerminalNativeView {
+                        nativeTerminal.revealBottomForCurrentViewport()
+                    } else {
+                        terminal.scroll(toPosition: 1)
+                    }
+                }
+            }
+        }
+
+        func stopObservingKeyboard() {
+            guard let keyboardDidShowObserver else { return }
+            NotificationCenter.default.removeObserver(keyboardDidShowObserver)
+            self.keyboardDidShowObserver = nil
         }
 
         func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {

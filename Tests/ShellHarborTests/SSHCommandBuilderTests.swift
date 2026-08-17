@@ -476,10 +476,14 @@ final class SSHCommandBuilderTests: XCTestCase {
             sessionName: "review"
         )
 
-        XCTAssertTrue(command.contains("tmux set-option -t 'review' mouse on"))
+        XCTAssertTrue(command.contains("set-option -t"))
+        XCTAssertTrue(command.contains("review"))
+        XCTAssertTrue(command.contains("mouse on"))
         XCTAssertFalse(command.contains("set-option -g"))
-        XCTAssertTrue(command.contains("tmux attach-session -t 'review'"))
+        XCTAssertTrue(command.contains("attach-session -t"))
         XCTAssertFalse(command.contains("exec tmux"))
+        XCTAssertTrue(command.contains("${SHELL:-/bin/sh}"))
+        XCTAssertTrue(command.contains("command -v tmux"))
     }
 
     func testRemoteMultiplexerSessionListingParsesTmuxOnly() {
@@ -1818,6 +1822,186 @@ final class SSHCommandBuilderTests: XCTestCase {
     }
 
     @MainActor
+    func testTerminalSearchReportsCurrentAndTotalMatches() {
+        let terminal = SteadyCursorTerminalView(frame: .init(
+            x: 0,
+            y: 0,
+            width: 800,
+            height: 500
+        ))
+        terminal.feed(text: "alpha beta alpha gamma alpha")
+
+        XCTAssertTrue(terminal.findNext("alpha", scrollToResult: false))
+        var summary = terminal.searchMatchSummary("alpha")
+        XCTAssertEqual(summary.index, 1)
+        XCTAssertEqual(summary.total, 3)
+
+        XCTAssertTrue(terminal.findNext("alpha", scrollToResult: false))
+        summary = terminal.searchMatchSummary("alpha")
+        XCTAssertEqual(summary.index, 2)
+        XCTAssertEqual(summary.total, 3)
+    }
+
+    @MainActor
+    func testTerminalSearchScrollsToTmuxAlternateBufferMatch() {
+        let terminal = SteadyCursorTerminalView(frame: .init(
+            x: 0,
+            y: 0,
+            width: 800,
+            height: 120
+        ))
+        terminal.feed(text: "\u{001B}[?1049hneedle-at-top\r\n")
+        for line in 0..<40 {
+            terminal.feed(text: "alternate line \(line)\r\n")
+        }
+
+        XCTAssertTrue(terminal.getTerminal().isCurrentBufferAlternate)
+        XCTAssertGreaterThan(terminal.scrollPosition, 0)
+        XCTAssertTrue(terminal.findNext("needle-at-top"))
+        XCTAssertEqual(terminal.scrollPosition, 0)
+    }
+
+    @MainActor
+    func testTerminalSearchNextScrollsAcrossTmuxScreens() {
+        let terminal = SteadyCursorTerminalView(frame: .init(
+            x: 0,
+            y: 0,
+            width: 800,
+            height: 120
+        ))
+        terminal.feed(text: "\u{001B}[?1049hsystem-first\r\n")
+        for line in 0..<12 {
+            terminal.feed(text: "first filler \(line)\r\n")
+        }
+        terminal.feed(text: "system-second\r\n")
+        for line in 0..<12 {
+            terminal.feed(text: "second filler \(line)\r\n")
+        }
+        terminal.feed(text: "system-third\r\n")
+        for line in 0..<12 {
+            terminal.feed(text: "last filler \(line)\r\n")
+        }
+
+        XCTAssertTrue(terminal.findNext("system"))
+        XCTAssertEqual(terminal.scrollPosition, 0)
+        XCTAssertEqual(terminal.searchMatchSummary("system").total, 3)
+
+        XCTAssertTrue(terminal.findNext("system"))
+        let secondPosition = terminal.scrollPosition
+        XCTAssertGreaterThan(secondPosition, 0)
+        XCTAssertEqual(terminal.searchMatchSummary("system").index, 2)
+
+        XCTAssertTrue(terminal.findNext("system"))
+        XCTAssertGreaterThan(terminal.scrollPosition, secondPosition)
+        XCTAssertEqual(terminal.searchMatchSummary("system").index, 3)
+        XCTAssertEqual(terminal.searchMatchSummary("system").total, 3)
+    }
+
+    @MainActor
+    func testTerminalSearchIndexTracksFirstVisibleMatchAfterManualScroll() {
+        let findPasteboard = NSPasteboard(name: .find)
+        let previousFindText = findPasteboard.string(forType: .string)
+        defer {
+            findPasteboard.clearContents()
+            if let previousFindText {
+                findPasteboard.setString(previousFindText, forType: .string)
+            }
+        }
+        let terminal = SteadyCursorTerminalView(frame: .init(
+            x: 0,
+            y: 0,
+            width: 800,
+            height: 120
+        ))
+        terminal.feed(text: "\u{001B}[?1049hsystem-first\r\n")
+        for line in 0..<19 {
+            terminal.feed(text: "first filler \(line)\r\n")
+        }
+        terminal.feed(text: "system-second\r\n")
+        for line in 0..<19 {
+            terminal.feed(text: "second filler \(line)\r\n")
+        }
+        terminal.feed(text: "system-third\r\n")
+        for line in 0..<19 {
+            terminal.feed(text: "last filler \(line)\r\n")
+        }
+
+        findPasteboard.clearContents()
+        findPasteboard.setString("system", forType: .string)
+        terminal.showFindInterface()
+        XCTAssertEqual(terminal.searchMatchSummary("system").index, 1)
+
+        terminal.scroll(toPosition: 0.38)
+        var summary = terminal.searchMatchSummary("system")
+        XCTAssertEqual(summary.index, 2)
+        XCTAssertEqual(summary.total, 3)
+
+        XCTAssertTrue(terminal.findNext("system"))
+        summary = terminal.searchMatchSummary("system")
+        XCTAssertEqual(summary.index, 3)
+        XCTAssertEqual(summary.total, 3)
+    }
+
+    @MainActor
+    func testFindBarWheelUsesLocalScrollbackWhenTmuxMouseModeIsOn() throws {
+        let findPasteboard = NSPasteboard(name: .find)
+        let previousFindText = findPasteboard.string(forType: .string)
+        defer {
+            findPasteboard.clearContents()
+            if let previousFindText {
+                findPasteboard.setString(previousFindText, forType: .string)
+            }
+        }
+        findPasteboard.clearContents()
+
+        let terminal = SteadyCursorTerminalView(frame: .init(
+            x: 0,
+            y: 0,
+            width: 800,
+            height: 120
+        ))
+        terminal.feed(text: "\u{001B}[?1049h")
+        for line in 0..<40 {
+            terminal.feed(text: "tmux line \(line)\r\n")
+        }
+        terminal.feed(text: "\u{001B}[?1003h")
+        terminal.showFindInterface()
+        terminal.scrollTo(row: .max)
+        let bottomPosition = terminal.scrollPosition
+        XCTAssertGreaterThan(bottomPosition, 0)
+
+        let cgEvent = try XCTUnwrap(CGEvent(
+            scrollWheelEvent2Source: nil,
+            units: .line,
+            wheelCount: 1,
+            wheel1: 3,
+            wheel2: 0,
+            wheel3: 0
+        ))
+        let event = try XCTUnwrap(NSEvent(cgEvent: cgEvent))
+        terminal.scrollWheel(with: event)
+
+        XCTAssertLessThan(terminal.scrollPosition, bottomPosition)
+
+        terminal.scrollTo(row: .max)
+        let delegate = TerminalSendSpy()
+        terminal.terminalDelegate = delegate
+        let boundaryCGEvent = try XCTUnwrap(CGEvent(
+            scrollWheelEvent2Source: nil,
+            units: .line,
+            wheelCount: 1,
+            wheel1: -3,
+            wheel2: 0,
+            wheel3: 0
+        ))
+        let boundaryEvent = try XCTUnwrap(NSEvent(cgEvent: boundaryCGEvent))
+        terminal.scrollWheel(with: boundaryEvent)
+
+        XCTAssertEqual(terminal.scrollPosition, bottomPosition)
+        XCTAssertFalse(delegate.sentBytes.isEmpty)
+    }
+
+    @MainActor
     func testRetainedTerminalIgnoresTransientLayoutCollapse() {
         let terminal = SteadyCursorTerminalView(frame: .init(
             x: 0,
@@ -2634,4 +2818,18 @@ final class SSHCommandBuilderTests: XCTestCase {
             containsSearchField(in: $0)
         }
     }
+
+}
+
+private final class TerminalSendSpy: TerminalViewDelegate {
+    var sentBytes: [UInt8] = []
+
+    func sizeChanged(source: SwiftTerm.TerminalView, newCols: Int, newRows: Int) {}
+    func setTerminalTitle(source: SwiftTerm.TerminalView, title: String) {}
+    func hostCurrentDirectoryUpdate(source: SwiftTerm.TerminalView, directory: String?) {}
+    func send(source: SwiftTerm.TerminalView, data: ArraySlice<UInt8>) {
+        sentBytes.append(contentsOf: data)
+    }
+    func scrolled(source: SwiftTerm.TerminalView, position: Double) {}
+    func rangeChanged(source: SwiftTerm.TerminalView, startY: Int, endY: Int) {}
 }

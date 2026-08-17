@@ -202,6 +202,10 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     private var findBar: TerminalFindBarView?
     private var findBarTerm: String = ""
     private var findBarOptions: SearchOptions = SearchOptions()
+    private var findResults: [SearchResult] = []
+    private var isPerformingFindNavigation = false
+    private var findHighlightView: TerminalSearchHighlightView?
+    private var findScrollMarkerView: TerminalSearchScrollMarkerView?
     var debug: TerminalDebugView?
     var pendingDisplay: Bool = false
 #if canImport(MetalKit)
@@ -933,6 +937,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         scroller.isEnabled = canScroll
         scroller.doubleValue = scrollPosition
         scroller.knobProportion = scrollThumbsize
+        updateFindDecorationGeometry()
     }
     
     var userScrolling = false
@@ -1000,6 +1005,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         needsDisplay = true
 #endif
         updateCursorPosition()
+        updateFindDecorationGeometry()
     }
 
     public override func resizeSubviews(withOldSize oldSize: NSSize) {
@@ -1007,6 +1013,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         updateScroller()
         selection.active = false
         updateProgressBarFrame()
+        updateFindDecorationGeometry()
     }
     
     private var _hasFocus = false
@@ -2232,11 +2239,14 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         }
         updateFindPasteboard(term)
         let options = findBar?.options ?? SearchOptions()
+        isPerformingFindNavigation = true
+        defer { isPerformingFindNavigation = false }
         if next {
             _ = findNext(term, options: options)
         } else {
             _ = findPrevious(term, options: options)
         }
+        refreshFindPresentation(term: term, options: options)
     }
 
     private func setFindPasteboardFromSelection() {
@@ -2291,6 +2301,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
             bar.widthAnchor.constraint(lessThanOrEqualToConstant: 520)
         ])
         findBar = bar
+        ensureFindDecorationViews()
         return bar
     }
 
@@ -2302,12 +2313,28 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         if let initial {
             bar.searchText = initial
             handleFindBarSearchChanged(initial)
+        } else {
+            bar.setMatchSummary(index: 0, total: 0)
+            clearFindPresentation()
         }
         bar.focus()
     }
 
+    /// Opens and focuses SwiftTerm's native find bar without relying on the
+    /// application menu responder chain.
+    public func showFindInterface() {
+        showFindBar(prefillSelection: true)
+    }
+
+    /// Finds the next or previous match using the active find bar value.
+    public func findFromInterface(next: Bool) {
+        performFind(next: next)
+    }
+
     private func hideFindBar() {
         findBar?.isHidden = true
+        clearSearch()
+        clearFindPresentation()
         window?.makeFirstResponder(self)
     }
 
@@ -2315,17 +2342,156 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         findBarTerm = term
         if term.isEmpty {
             clearSearch()
+            clearFindPresentation()
             return
         }
         updateFindPasteboard(term)
+        isPerformingFindNavigation = true
+        defer { isPerformingFindNavigation = false }
         _ = findNext(term, options: findBarOptions)
+        refreshFindPresentation(term: term, options: findBarOptions)
     }
 
     private func handleFindBarOptionsChanged(_ options: SearchOptions) {
         findBarOptions = options
         if !findBarTerm.isEmpty {
+            isPerformingFindNavigation = true
+            defer { isPerformingFindNavigation = false }
             _ = findNext(findBarTerm, options: options)
+            refreshFindPresentation(term: findBarTerm, options: options)
         }
+    }
+
+    private func ensureFindDecorationViews() {
+        if findHighlightView == nil {
+            let overlay = TerminalSearchHighlightView(frame: bounds)
+            overlay.autoresizingMask = [.width, .height]
+            overlay.wantsLayer = true
+            overlay.layer?.backgroundColor = NSColor.clear.cgColor
+            if let caretView {
+                addSubview(overlay, positioned: .below, relativeTo: caretView)
+            } else {
+                addSubview(overlay)
+            }
+            if let scroller {
+                addSubview(scroller, positioned: .above, relativeTo: overlay)
+            }
+            findHighlightView = overlay
+        }
+
+        if findScrollMarkerView == nil {
+            let markerView = TerminalSearchScrollMarkerView(frame: .zero)
+            markerView.translatesAutoresizingMaskIntoConstraints = false
+            markerView.isHidden = true
+            addSubview(markerView, positioned: .above, relativeTo: scroller)
+            NSLayoutConstraint.activate([
+                markerView.trailingAnchor.constraint(equalTo: trailingAnchor),
+                markerView.topAnchor.constraint(equalTo: topAnchor),
+                markerView.bottomAnchor.constraint(equalTo: bottomAnchor),
+                markerView.widthAnchor.constraint(equalToConstant: 4)
+            ])
+            findScrollMarkerView = markerView
+        }
+
+        if let findBar {
+            addSubview(findBar, positioned: .above, relativeTo: findScrollMarkerView)
+        }
+    }
+
+    private func refreshFindPresentation(term: String, options: SearchOptions) {
+        ensureFindDecorationViews()
+        findResults = search.findAll(term: term, options: options, limit: 1000)
+        let summary = searchMatchSummary(term, options: options, limit: 1000)
+        findBar?.setMatchSummary(index: summary.index, total: summary.total)
+        updateFindDecorationGeometry()
+    }
+
+    private func clearFindPresentation() {
+        findResults.removeAll(keepingCapacity: true)
+        findBar?.setMatchSummary(index: 0, total: 0)
+        findHighlightView?.highlights = []
+        findScrollMarkerView?.markers = []
+    }
+
+    private func updateFindDecorationGeometry() {
+        guard !findResults.isEmpty, cellDimension != nil, terminal != nil else {
+            findHighlightView?.highlights = []
+            findScrollMarkerView?.markers = []
+            return
+        }
+
+        let buffer = terminal.displayBuffer
+        let visibleStart = buffer.yDisp
+        let visibleEnd = visibleStart + max(buffer.rows - 1, 0)
+        let columns = max(terminal.cols, 1)
+        if !isPerformingFindNavigation {
+            synchronizeFindCurrentResult(
+                visibleStart: visibleStart,
+                visibleEnd: visibleEnd,
+                columns: columns
+            )
+        }
+        let current = search.lastResult
+        var highlights: [TerminalSearchHighlight] = []
+
+        for result in findResults {
+            let isCurrent = result.row == current?.row && result.col == current?.col
+            let linearStart = result.row * columns + result.col
+            let linearEnd = linearStart + max(result.size, 1)
+            let firstRow = linearStart / columns
+            let lastRow = max(firstRow, (linearEnd - 1) / columns)
+            guard lastRow >= visibleStart, firstRow <= visibleEnd else { continue }
+
+            for row in max(firstRow, visibleStart)...min(lastRow, visibleEnd) {
+                let rowStart = row * columns
+                let startColumn = max(0, linearStart - rowStart)
+                let endColumn = min(columns, linearEnd - rowStart)
+                guard endColumn > startColumn else { continue }
+                let screenRow = row - visibleStart
+                let rect = CGRect(
+                    x: CGFloat(startColumn) * cellDimension.width,
+                    y: bounds.height - CGFloat(screenRow + 1) * cellDimension.height,
+                    width: CGFloat(endColumn - startColumn) * cellDimension.width,
+                    height: cellDimension.height
+                )
+                highlights.append(TerminalSearchHighlight(rect: rect, isCurrent: isCurrent))
+            }
+        }
+        findHighlightView?.highlights = highlights
+
+        let lastBufferRow = max(buffer.lines.count - 1, 1)
+        findScrollMarkerView?.markers = findResults.map { result in
+            TerminalSearchScrollMarkerView.Marker(
+                position: min(1, max(0, CGFloat(result.row) / CGFloat(lastBufferRow))),
+                isCurrent: result.row == current?.row && result.col == current?.col
+            )
+        }
+    }
+
+    private func synchronizeFindCurrentResult(
+        visibleStart: Int,
+        visibleEnd: Int,
+        columns: Int
+    ) {
+        guard let index = findResults.firstIndex(where: { result in
+            let linearStart = result.row * columns + result.col
+            let linearEnd = linearStart + max(result.size, 1)
+            let firstRow = linearStart / columns
+            let lastRow = max(firstRow, (linearEnd - 1) / columns)
+            return lastRow >= visibleStart && firstRow <= visibleEnd
+        }) else {
+            return
+        }
+
+        let result = findResults[index]
+        if search.lastResult?.row == result.row,
+           search.lastResult?.col == result.col {
+            return
+        }
+        search.activate(result)
+        let range = search.selectionRange(for: result)
+        selection.setSelection(start: range.start, end: range.end)
+        findBar?.setMatchSummary(index: index + 1, total: findResults.count)
     }
     
     open func selectionChanged(source: Terminal) {
@@ -2780,9 +2946,20 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         // equivalent runtime setting), while zellij enables it by default.
         // Respect that live mode instead of translating wheel input into arrow
         // keys, which keeps normal shells on local SwiftTerm scrollback.
-        if allowMouseReporting && terminal.mouseMode != .off {
+        // While Find has moved the viewport into ShellHarbor's local
+        // scrollback, keep wheel events local only while that direction can
+        // actually move. At the local top/bottom boundary, immediately fall
+        // back to tmux mouse reporting so opening Find never disables the
+        // multiplexer gesture.
+        let findIsVisible = findBar?.isHidden == false
+        let displayBuffer = terminal.displayBuffer
+        let maxLocalScroll = max(0, displayBuffer.lines.count - displayBuffer.rows)
+        let canMoveLocally = scrollingUp
+            ? displayBuffer.yDisp > 0
+            : displayBuffer.yDisp < maxLocalScroll
+        let findConsumesWheelLocally = findIsVisible && canMoveLocally
+        if allowMouseReporting && terminal.mouseMode != .off && !findConsumesWheelLocally {
             let hit = calculateMouseHit(with: event)
-            let displayBuffer = terminal.displayBuffer
             let screenRow = max(
                 0,
                 min(

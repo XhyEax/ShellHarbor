@@ -112,7 +112,13 @@ private enum MobileTerminalMultiplexer: String, CaseIterable, Identifiable {
         let quoted = "'" + sessionName.replacingOccurrences(of: "'", with: "'\\''") + "'"
         // Keep the login shell alive so detaching from or exiting tmux does
         // not strand the iOS Session in a terminated PTY.
-        let command = "tmux has-session -t \(quoted) 2>/dev/null || tmux new-session -d -s \(quoted); tmux set-option -t \(quoted) mouse on && tmux attach-session -t \(quoted)"
+        let payload = """
+        tmux_bin=$(command -v tmux 2>/dev/null || true)
+        for candidate in /opt/homebrew/bin/tmux /usr/local/bin/tmux /usr/bin/tmux /opt/pkg/bin/tmux /opt/procursus/bin/tmux /var/jb/usr/bin/tmux "$HOME/.local/bin/tmux" "$HOME/bin/tmux"; do [ -n "$tmux_bin" ] || [ ! -x "$candidate" ] || tmux_bin=$candidate; done
+        if [ -z "$tmux_bin" ]; then printf '%s\n' 'tmux command not found after loading login shell'; else "$tmux_bin" has-session -t \(quoted) 2>/dev/null || "$tmux_bin" new-session -d -s \(quoted); "$tmux_bin" set-option -t \(quoted) mouse on && "$tmux_bin" attach-session -t \(quoted); fi
+        """
+        let shellQuotedPayload = "'" + payload.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        let command = "\"${SHELL:-/bin/sh}\" -lic \(shellQuotedPayload)"
         return (command, existingName ?? generatedSuffix)
     }
 
@@ -1792,6 +1798,7 @@ private struct MobileTerminalSessionView: View {
     @State private var tmuxSessions: [String] = []
     @State private var loadingTmuxSessions = false
     @State private var tmuxRefreshError: String?
+    @State private var dismissedConnectionFailure: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1975,6 +1982,13 @@ private struct MobileTerminalSessionView: View {
         }
         .onChange(of: session.controller.state) { _, state in
             registerAppCommands()
+            if case .failed = state {
+                // Keep a user-dismissed failure hidden until a new connection
+                // attempt changes state. A different failure message is shown
+                // automatically by the overlay comparison below.
+            } else {
+                dismissedConnectionFailure = nil
+            }
             if state == .connected {
                 Task { await refreshTmuxSessions() }
             }
@@ -2201,7 +2215,8 @@ private struct MobileTerminalSessionView: View {
 
     @ViewBuilder
     private var connectionOverlay: some View {
-        if case .failed(let message) = session.controller.state {
+        if case .failed(let message) = session.controller.state,
+           dismissedConnectionFailure != message {
             VStack(spacing: 10) {
                 Text(message)
                     .font(.callout)
@@ -2219,6 +2234,11 @@ private struct MobileTerminalSessionView: View {
                         Label("重新连接", systemImage: "arrow.clockwise")
                     }
                     .buttonStyle(.borderedProminent)
+                    Button {
+                        dismissedConnectionFailure = message
+                    } label: {
+                        Label("关闭", systemImage: "xmark")
+                    }
                 }
             }
             .padding()

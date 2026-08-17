@@ -1460,6 +1460,30 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         let displayBuffer = terminal.displayBuffer
         contentOffset = CGPoint (x: 0, y: CGFloat (displayBuffer.lines.count-displayBuffer.rows)*cellDimension.height)
     }
+
+    /// Reveals the last row containing terminal text within a temporarily
+    /// clipped viewport without resizing or reflowing the terminal grid.
+    public func revealLastContentLine(viewportHeight: CGFloat) {
+        let displayBuffer = terminal.displayBuffer
+        guard viewportHeight > 0, cellDimension.height > 0,
+              displayBuffer.lines.count > 0 else { return }
+
+        var lastContentRow: Int?
+        for row in stride(from: displayBuffer.lines.count - 1, through: 0, by: -1) {
+            if displayBuffer.lines[row].getTrimmedLength() > 0 {
+                lastContentRow = row
+                break
+            }
+        }
+        guard let lastContentRow else { return }
+        let target = max(
+            -adjustedContentInset.top,
+            CGFloat(lastContentRow + 1) * cellDimension.height
+                - viewportHeight + adjustedContentInset.bottom
+        )
+        contentOffset = CGPoint(x: contentOffset.x, y: target)
+        setNeedsDisplay(bounds)
+    }
     
     public func deleteBackward() {
         uitiLog("deleteBackward() \(textInputStateDescription())")

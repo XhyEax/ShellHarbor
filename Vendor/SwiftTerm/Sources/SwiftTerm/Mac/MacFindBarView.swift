@@ -14,6 +14,7 @@ final class TerminalFindBarView: NSVisualEffectView, NSSearchFieldDelegate {
     var onOptionsChanged: ((SearchOptions) -> Void)?
 
     private let searchField = NSSearchField()
+    private let resultLabel = NSTextField(labelWithString: "0/0")
     private let previousButton = NSButton()
     private let nextButton = NSButton()
     private let closeButton = NSButton()
@@ -48,6 +49,13 @@ final class TerminalFindBarView: NSVisualEffectView, NSSearchFieldDelegate {
         window?.makeFirstResponder(searchField)
     }
 
+    func setMatchSummary(index: Int, total: Int) {
+        resultLabel.stringValue = "\(index)/\(total)"
+        resultLabel.textColor = total == 0 ? .secondaryLabelColor : .labelColor
+        previousButton.isEnabled = total > 0
+        nextButton.isEnabled = total > 0
+    }
+
     private func setup() {
         wantsLayer = true
         material = .popover
@@ -64,6 +72,13 @@ final class TerminalFindBarView: NSVisualEffectView, NSSearchFieldDelegate {
         searchField.action = #selector(searchFieldAction)
         searchField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         searchField.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+        resultLabel.translatesAutoresizingMaskIntoConstraints = false
+        resultLabel.alignment = .right
+        resultLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        resultLabel.textColor = .secondaryLabelColor
+        resultLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        resultLabel.setContentHuggingPriority(.required, for: .horizontal)
 
         configureButton(previousButton, symbol: "chevron.up", tooltip: "Previous")
         previousButton.target = self
@@ -83,6 +98,7 @@ final class TerminalFindBarView: NSVisualEffectView, NSSearchFieldDelegate {
 
         let stack = NSStackView(views: [
             searchField,
+            resultLabel,
             previousButton,
             nextButton,
             caseSensitiveButton,
@@ -102,7 +118,8 @@ final class TerminalFindBarView: NSVisualEffectView, NSSearchFieldDelegate {
             stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
             stack.topAnchor.constraint(equalTo: topAnchor, constant: 6),
             stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -6),
-            searchField.widthAnchor.constraint(greaterThanOrEqualToConstant: 200)
+            searchField.widthAnchor.constraint(greaterThanOrEqualToConstant: 200),
+            resultLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 42)
         ])
     }
 
@@ -162,6 +179,68 @@ final class TerminalFindBarView: NSVisualEffectView, NSSearchFieldDelegate {
             return true
         }
         return false
+    }
+}
+
+struct TerminalSearchHighlight {
+    let rect: CGRect
+    let isCurrent: Bool
+}
+
+final class TerminalSearchHighlightView: NSView {
+    var highlights: [TerminalSearchHighlight] = [] {
+        didSet { needsDisplay = true }
+    }
+
+    override var isFlipped: Bool { false }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        for highlight in highlights where highlight.rect.intersects(dirtyRect) {
+            let color = highlight.isCurrent
+                ? NSColor.systemYellow.withAlphaComponent(0.82)
+                : NSColor.systemYellow.withAlphaComponent(0.48)
+            color.setFill()
+            highlight.rect.fill(using: .sourceOver)
+        }
+    }
+}
+
+final class TerminalSearchScrollMarkerView: NSView {
+    struct Marker {
+        let position: CGFloat
+        let isCurrent: Bool
+    }
+
+    var markers: [Marker] = [] {
+        didSet {
+            isHidden = markers.isEmpty
+            needsDisplay = true
+        }
+    }
+
+    override var isFlipped: Bool { false }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard bounds.height > 0 else { return }
+        for marker in markers {
+            let thickness: CGFloat = marker.isCurrent ? 3 : 2
+            let y = max(0, min(bounds.height - thickness,
+                               bounds.height * (1 - marker.position) - thickness / 2))
+            let rect = CGRect(x: max(0, bounds.width - 4), y: y,
+                              width: min(4, bounds.width), height: thickness)
+            (marker.isCurrent ? NSColor.systemOrange : NSColor.systemYellow).setFill()
+            rect.fill()
+        }
     }
 }
 #endif

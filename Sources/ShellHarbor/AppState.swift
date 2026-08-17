@@ -6,8 +6,26 @@ enum RemoteMoveDirection {
     case down
 }
 
+enum UploadCollisionResolution {
+    case overwrite
+    case rename
+}
+
+struct UploadCollisionRequest: Identifiable {
+    let id = UUID()
+    let entries: [FileEntry]
+    let remoteDirectory: String
+    let existingNames: Set<String>
+    let workspace: SessionWorkspace
+
+    var conflictingNames: [String] {
+        entries.map(\.name).filter(existingNames.contains).sorted()
+    }
+}
+
 @MainActor
 final class AppState: ObservableObject {
+    private var commandKeyMonitor: Any?
     /// Persisted Remote definitions. The historical property name is kept to
     /// avoid a migration of the on-disk JSON format.
     @Published var sessions: [SessionProfile]
@@ -17,6 +35,7 @@ final class AppState: ObservableObject {
     @Published var showingSessionEditor = false
     @Published var showingLocalSettings = false
     @Published var notice: String?
+    @Published var uploadCollisionRequest: UploadCollisionRequest?
     @Published private(set) var globalLocalPathHistory: [String] =
         UserDefaults.standard.stringArray(forKey: "globalLocalPathHistory") ?? []
     @Published var shcliLinkEnabled = SHCLILinkPreferences.savedEnabled {
@@ -207,6 +226,21 @@ final class AppState: ObservableObject {
         }
         restoreSessionWorkspaces()
         synchronizeSHCLILink()
+        commandKeyMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: .keyDown
+        ) { @MainActor [weak self] event in
+            guard let self,
+                  event.modifierFlags.intersection([
+                      .command, .shift, .option, .control
+                  ]) == .command,
+                  event.charactersIgnoringModifiers?.lowercased() == "f",
+                  let workspace = self.selectedWorkspace,
+                  workspace.mode == .terminal else {
+                return event
+            }
+            workspace.terminal.showFind()
+            return nil
+        }
     }
 
     private func synchronizeSHCLILink() {
@@ -1630,12 +1664,23 @@ final class AppState: ObservableObject {
                     jumpProfile: workspace.connectionJumpProfile,
                     path: remoteDirectory
                 )
-                enqueueUploads(
-                    entries,
-                    remoteDirectory: listing.path,
-                    existingNames: Set(listing.entries.map(\.name)),
-                    in: workspace
-                )
+                let existingNames = Set(listing.entries.map(\.name))
+                if entries.contains(where: { existingNames.contains($0.name) }) {
+                    uploadCollisionRequest = UploadCollisionRequest(
+                        entries: entries,
+                        remoteDirectory: listing.path,
+                        existingNames: existingNames,
+                        workspace: workspace
+                    )
+                } else {
+                    enqueueUploads(
+                        entries,
+                        remoteDirectory: listing.path,
+                        existingNames: existingNames,
+                        resolution: .rename,
+                        in: workspace
+                    )
+                }
             } catch {
                 notice = "上传目标目录读取失败：\(error.localizedDescription)"
             }
@@ -1682,6 +1727,7 @@ final class AppState: ObservableObject {
         _ entries: [FileEntry],
         remoteDirectory: String,
         existingNames: Set<String>,
+        resolution: UploadCollisionResolution,
         in workspace: SessionWorkspace
     ) {
         for entry in entries {
@@ -1692,6 +1738,7 @@ final class AppState: ObservableObject {
                 totalBytes: entry.isDirectory ? nil : entry.size,
                 remoteDirectory: remoteDirectory,
                 existingNames: existingNames,
+                resolution: resolution,
                 in: workspace
             )
         }
@@ -1704,6 +1751,7 @@ final class AppState: ObservableObject {
         totalBytes: Int64?,
         remoteDirectory: String,
         existingNames: Set<String>,
+        resolution: UploadCollisionResolution,
         in workspace: SessionWorkspace
     ) {
         let queuedNames = Set(
@@ -1718,11 +1766,15 @@ final class AppState: ObservableObject {
                     ($0.destination as NSString).lastPathComponent
                 }
         )
-        let resolvedName = FileNameCollisionResolver.uniqueName(
-            for: fileName,
-            isDirectory: isDirectory
-        ) {
-            existingNames.contains($0) || queuedNames.contains($0)
+        let resolvedName = if resolution == .overwrite {
+            fileName
+        } else {
+            FileNameCollisionResolver.uniqueName(
+                for: fileName,
+                isDirectory: isDirectory
+            ) {
+                existingNames.contains($0) || queuedNames.contains($0)
+            }
         }
         let destination = RemoteFileService.join(
             remoteDirectory,
@@ -1737,6 +1789,22 @@ final class AppState: ObservableObject {
             recursive: isDirectory,
             totalBytes: totalBytes
         )
+    }
+
+    func resolveUploadCollision(_ resolution: UploadCollisionResolution) {
+        guard let request = uploadCollisionRequest else { return }
+        uploadCollisionRequest = nil
+        enqueueUploads(
+            request.entries,
+            remoteDirectory: request.remoteDirectory,
+            existingNames: request.existingNames,
+            resolution: resolution,
+            in: request.workspace
+        )
+    }
+
+    func cancelUploadCollision() {
+        uploadCollisionRequest = nil
     }
 
     func downloadSelected() {

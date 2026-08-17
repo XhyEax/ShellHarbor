@@ -20,6 +20,7 @@ private struct TerminalPanel: View {
     let isActive: Bool
     @State private var isRemoteFileDropTarget = false
     @State private var showingTerminalSettings = false
+    @State private var dismissedConnectionFailure: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -68,6 +69,13 @@ private struct TerminalPanel: View {
                     .foregroundStyle(.secondary)
                 Spacer()
                 Button {
+                    controller.showFind()
+                } label: {
+                    Image(systemName: "magnifyingglass")
+                }
+                .buttonStyle(.borderless)
+                .help("搜索终端")
+                Button {
                     showingTerminalSettings.toggle()
                 } label: {
                     Image(systemName: "paintpalette")
@@ -85,14 +93,6 @@ private struct TerminalPanel: View {
                         scrollbackLines: $state.terminalScrollbackLines
                     )
                 }
-                Button {
-                    controller.sendInterrupt()
-                } label: {
-                    Image(systemName: "stop.circle")
-                }
-                .buttonStyle(.borderless)
-                .help("发送 Ctrl-C")
-                .disabled(controller.state != .connected)
                 Button {
                     controller.clear()
                 } label: {
@@ -134,7 +134,8 @@ private struct TerminalPanel: View {
                     }
                     .padding()
                 }
-                if case let .failed(message) = controller.state {
+                if case let .failed(message) = controller.state,
+                   dismissedConnectionFailure != message {
                     connectionFailureOverlay(message: message)
                 }
             }
@@ -180,6 +181,12 @@ private struct TerminalPanel: View {
                 }
             }
         }
+        .onChange(of: controller.state) { _, connectionState in
+            if case .failed = connectionState {
+                return
+            }
+            dismissedConnectionFailure = nil
+        }
     }
 
     private var statusText: String {
@@ -208,6 +215,11 @@ private struct TerminalPanel: View {
                     Label("重新连接", systemImage: "arrow.clockwise")
                 }
                 .buttonStyle(.borderedProminent)
+                Button {
+                    dismissedConnectionFailure = message
+                } label: {
+                    Label("关闭", systemImage: "xmark")
+                }
             }
         }
         .padding()

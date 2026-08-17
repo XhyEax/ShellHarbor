@@ -38,7 +38,15 @@ enum RemoteFileService {
         )
         let result = try await CommandRunner.run(invocation)
         guard result.exitCode == 0 else {
-            throw SSHServiceError.commandFailed(result.exitCode, result.output)
+            let diagnostic: String
+            if result.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+               result.exitCode == 255 {
+                let jump = jumpProfile.map { "，跳板：\($0.name)" } ?? ""
+                diagnostic = "SSH 未返回 stderr。目标：\(profile.username)@\(profile.resolvedHost):\(profile.port)\(jump)。请检查网络、Proxy/Tailscale、主机密钥和认证方式；BatchMode 文件请求不会弹出密码提示。"
+            } else {
+                diagnostic = result.output
+            }
+            throw SSHServiceError.commandFailed(result.exitCode, diagnostic)
         }
         return try parseResolvedOutput(
             result.output,

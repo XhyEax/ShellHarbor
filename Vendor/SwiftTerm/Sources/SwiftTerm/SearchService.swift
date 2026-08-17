@@ -49,6 +49,14 @@ final class SearchService {
         lastSelection = selection
     }
 
+    /// Makes an already discovered match the active search anchor. This is
+    /// used when a terminal viewport is manually scrolled so Find Next/Previous
+    /// continues from the first match that is actually visible to the user.
+    func activate (_ result: SearchResult) {
+        lastResult = result
+        lastSelection = selection(for: result)
+    }
+
     @discardableResult
     func findNext (term: String, options: SearchOptions = SearchOptions()) -> SearchResult? {
         guard state.isValidSearchTerm(term) else {

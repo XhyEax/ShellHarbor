@@ -61,6 +61,7 @@ final class MobilePortForwardGlue: ChannelDuplexHandler, @unchecked Sendable {
 
     private var partner: MobilePortForwardGlue?
     private var context: ChannelHandlerContext?
+    private var pendingRead = false
 
     private init() {}
 
@@ -74,6 +75,9 @@ final class MobilePortForwardGlue: ChannelDuplexHandler, @unchecked Sendable {
 
     func handlerAdded(context: ChannelHandlerContext) {
         self.context = context
+        if context.channel.isWritable {
+            partner?.partnerBecameWritable()
+        }
     }
 
     func handlerRemoved(context: ChannelHandlerContext) {
@@ -90,12 +94,33 @@ final class MobilePortForwardGlue: ChannelDuplexHandler, @unchecked Sendable {
     }
 
     func channelInactive(context: ChannelHandlerContext) {
-        partner?.context?.close(promise: nil)
+        partner?.context?.close(mode: .all, promise: nil)
     }
 
     func errorCaught(context: ChannelHandlerContext, error: Error) {
         context.close(promise: nil)
         partner?.context?.close(promise: nil)
+    }
+
+    func read(context: ChannelHandlerContext) {
+        if partner?.context?.channel.isWritable == true {
+            context.read()
+        } else {
+            pendingRead = true
+        }
+    }
+
+    func channelWritabilityChanged(context: ChannelHandlerContext) {
+        if context.channel.isWritable {
+            partner?.partnerBecameWritable()
+        }
+        context.fireChannelWritabilityChanged()
+    }
+
+    private func partnerBecameWritable() {
+        guard pendingRead else { return }
+        pendingRead = false
+        context?.read()
     }
 }
 

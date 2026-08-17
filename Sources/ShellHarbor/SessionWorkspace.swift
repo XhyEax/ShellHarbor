@@ -13,7 +13,12 @@ enum TerminalMultiplexer: String, Codable {
         case .tmux:
             // Do not exec tmux: detach/exit must return to the original login
             // shell so the ShellHarbor Session remains interactive.
-            return "tmux has-session -t \(quoted) 2>/dev/null || tmux new-session -d -s \(quoted); tmux set-option -t \(quoted) mouse on && tmux attach-session -t \(quoted)"
+            let payload = """
+            tmux_bin=$(command -v tmux 2>/dev/null || true)
+            for candidate in /opt/homebrew/bin/tmux /usr/local/bin/tmux /usr/bin/tmux /opt/pkg/bin/tmux /opt/procursus/bin/tmux /var/jb/usr/bin/tmux "$HOME/.local/bin/tmux" "$HOME/bin/tmux"; do [ -n "$tmux_bin" ] || [ ! -x "$candidate" ] || tmux_bin=$candidate; done
+            if [ -z "$tmux_bin" ]; then printf '%s\n' 'tmux command not found after loading login shell'; else "$tmux_bin" has-session -t \(quoted) 2>/dev/null || "$tmux_bin" new-session -d -s \(quoted); "$tmux_bin" set-option -t \(quoted) mouse on && "$tmux_bin" attach-session -t \(quoted); fi
+            """
+            return "\"${SHELL:-/bin/sh}\" -lic \(SSHCommandBuilder.shellQuote(payload))"
         case .zellij:
             return ":"
         }

@@ -52,6 +52,31 @@ struct MainView: View {
             LocalSettingsView()
                 .environmentObject(state)
         }
+        .confirmationDialog(
+            "远端已有同名项目",
+            isPresented: Binding(
+                get: { state.uploadCollisionRequest != nil },
+                set: { if !$0 { state.cancelUploadCollision() } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("覆盖", role: .destructive) {
+                state.resolveUploadCollision(.overwrite)
+            }
+            Button("新建（1）") {
+                state.resolveUploadCollision(.rename)
+            }
+            Button("取消", role: .cancel) {
+                state.cancelUploadCollision()
+            }
+        } message: {
+            if let request = state.uploadCollisionRequest {
+                Text(
+                    request.conflictingNames.prefix(5).joined(separator: "、")
+                        + (request.conflictingNames.count > 5 ? " 等" : "")
+                )
+            }
+        }
         .overlay {
             if let notice = state.notice {
                 NoticeOverlay(message: notice) {

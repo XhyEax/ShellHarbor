@@ -16,6 +16,7 @@ public enum SHCLIError: LocalizedError {
     case invalidProxy(String)
     case tailscaleHelperUnavailable
     case tailscaleStartupFailed(String)
+    case scpDirectionRequired(String, String)
     case pipeFailure(Int32)
     case processFailure(String, Int32)
 
@@ -45,6 +46,8 @@ public enum SHCLIError: LocalizedError {
             "找不到 ShellHarbor 内置 Tailscale helper。"
         case let .tailscaleStartupFailed(message):
             "Tailscale Proxy 启动失败：\(message)"
+        case let .scpDirectionRequired(source, destination):
+            "from 和 to 在本地都存在，无法自动判断 SCP 方向：\(source) → \(destination)。请在交互终端中重新执行并选择方向。"
         case let .pipeFailure(code):
             "无法创建安全密码管道（errno \(code)）。"
         case let .processFailure(path, code):
@@ -524,6 +527,48 @@ public struct SHSCPTransfer: Equatable {
     public let remotePath: String
     public let direction: Direction
 
+    public init(localPath: String, remotePath: String, direction: Direction) {
+        self.localPath = localPath
+        self.remotePath = remotePath
+        self.direction = direction
+    }
+
+    public static func bothEndpointsExistLocally(
+        from source: String,
+        to destination: String,
+        fileManager: FileManager = .default
+    ) -> Bool {
+        fileManager.fileExists(
+            atPath: NSString(string: source).expandingTildeInPath
+        ) && fileManager.fileExists(
+            atPath: NSString(string: destination).expandingTildeInPath
+        )
+    }
+
+    public static func make(
+        from source: String,
+        to destination: String,
+        direction: Direction
+    ) -> SHSCPTransfer {
+        switch direction {
+        case .upload:
+            SHSCPTransfer(
+                localPath: NSString(string: source).expandingTildeInPath,
+                remotePath: destination,
+                direction: .upload
+            )
+        case .download:
+            SHSCPTransfer(
+                localPath: collisionFreeDownloadPath(
+                    remotePath: source,
+                    requestedLocalPath: destination
+                ),
+                remotePath: source,
+                direction: .download
+            )
+        }
+    }
+
     public static func detect(
         from source: String,
         to destination: String?,
@@ -556,10 +601,42 @@ public struct SHSCPTransfer: Equatable {
             )
         }
         return SHSCPTransfer(
-            localPath: NSString(string: destination).expandingTildeInPath,
+            localPath: collisionFreeDownloadPath(
+                remotePath: source,
+                requestedLocalPath: destination,
+                fileManager: fileManager
+            ),
             remotePath: source,
             direction: .download
         )
+    }
+
+    private static func collisionFreeDownloadPath(
+        remotePath: String,
+        requestedLocalPath: String,
+        fileManager: FileManager = .default
+    ) -> String {
+        let expanded = NSString(string: requestedLocalPath).expandingTildeInPath
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: expanded, isDirectory: &isDirectory) else {
+            return expanded
+        }
+        if isDirectory.boolValue {
+            let remoteName = (remotePath as NSString).lastPathComponent
+            let name = uniqueLocalName(
+                remoteName.isEmpty ? "download" : remoteName,
+                in: expanded,
+                fileManager: fileManager
+            )
+            return (expanded as NSString).appendingPathComponent(name)
+        }
+        let parent = (expanded as NSString).deletingLastPathComponent
+        let name = uniqueLocalName(
+            (expanded as NSString).lastPathComponent,
+            in: parent,
+            fileManager: fileManager
+        )
+        return (parent as NSString).appendingPathComponent(name)
     }
 
     private static func uniqueLocalName(

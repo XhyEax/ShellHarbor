@@ -178,6 +178,28 @@ struct MobileRemoteFilesView: View {
         .sheet(isPresented: $showingTransfers) {
             MobileTransferCenterView(browser: browser)
         }
+        .confirmationDialog(
+            "远端已有同名项目",
+            isPresented: Binding(
+                get: { browser.uploadCollisionRequest != nil },
+                set: { if !$0 { browser.cancelUploadCollision() } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("覆盖", role: .destructive) {
+                browser.resolveUploadCollision(overwrite: true)
+            }
+            Button("新建（1）") {
+                browser.resolveUploadCollision(overwrite: false)
+            }
+            Button("取消", role: .cancel) {
+                browser.cancelUploadCollision()
+            }
+        } message: {
+            if let request = browser.uploadCollisionRequest {
+                Text(request.conflictingNames.prefix(5).joined(separator: "、"))
+            }
+        }
         .alert("新建文件夹", isPresented: $isCreatingFolder) {
             TextField("名称", text: $newFolderName)
             Button("创建") {

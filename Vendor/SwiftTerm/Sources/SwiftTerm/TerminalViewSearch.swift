@@ -103,10 +103,6 @@ extension TerminalView {
         guard rows > 0 else {
             return
         }
-        if terminal.isDisplayBufferAlternate {
-            return
-        }
-
         let upperVisible = displayBuffer.yDisp
         let lowerVisible = displayBuffer.yDisp + rows - 1
         if row >= upperVisible && row <= lowerVisible {

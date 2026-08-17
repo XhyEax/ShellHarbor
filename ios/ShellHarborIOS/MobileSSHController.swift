@@ -330,6 +330,8 @@ final class MobileSSHController {
     @ObservationIgnored private var hasReceivedLiveOutput = false
     @ObservationIgnored private var pendingHostKeyDecision: (@Sendable (Bool) -> Void)?
     @ObservationIgnored private var pendingStartupCommand: String?
+    @ObservationIgnored private var lastTerminalSize:
+        (cols: Int, rows: Int, pixelWidth: Int, pixelHeight: Int)?
     @ObservationIgnored private let configuredStartupCommand: String?
     @ObservationIgnored private let trustHostKey: @MainActor (String) -> Void
     @ObservationIgnored private let trustJumpHostKey: @MainActor (String) -> Void
@@ -458,7 +460,7 @@ final class MobileSSHController {
                         } catch { break }
                         continue
                     }
-                    self.state = .failed(Self.safeMessage(for: error))
+                    self.state = .failed(self.connectionFailureMessage(for: error))
                     break
                 }
             }
@@ -870,11 +872,13 @@ final class MobileSSHController {
     }
 
     func resize(cols: Int, rows: Int, pixelWidth: Int, pixelHeight: Int) {
+        guard cols > 0, rows > 0 else { return }
+        lastTerminalSize = (cols, rows, pixelWidth, pixelHeight)
         if let moshTransport {
             moshTransport.resize(cols: cols, rows: rows, pixelWidth: pixelWidth, pixelHeight: pixelHeight)
             return
         }
-        guard let writer, cols > 0, rows > 0 else { return }
+        guard let writer else { return }
         Task {
             try? await writer.changeSize(
                 cols: cols,
@@ -1331,6 +1335,18 @@ final class MobileSSHController {
                     catch { return }
                     guard self.state == .connected else { return }
                     self.sendWithoutTracking([0x0D][...])
+                    do { try await Task.sleep(for: .milliseconds(650)) }
+                    catch { return }
+                    guard self.state == .connected,
+                          let size = self.lastTerminalSize else { return }
+                    // tmux becomes the foreground process after the startup
+                    // command is submitted, so re-send the current PTY size.
+                    self.resize(
+                        cols: size.cols,
+                        rows: size.rows,
+                        pixelWidth: size.pixelWidth,
+                        pixelHeight: size.pixelHeight
+                    )
                     return
                 }
                 do { try await Task.sleep(for: .milliseconds(150)) }
@@ -1410,9 +1426,30 @@ final class MobileSSHController {
         parent == "/" ? "/\(name)" : "\(parent)/\(name)"
     }
 
-    private static func safeMessage(for error: Error) -> String {
-        let message = error.localizedDescription
-        return message.isEmpty ? "SSH 连接失败" : message
+    private func connectionFailureMessage(for error: Error) -> String {
+        let endpoint = remote.host.isEmpty ? "127.0.0.1" : remote.host
+        var route = "目标：\(remote.username)@\(endpoint):\(remote.port)"
+        if remote.proxyType == .tailscale || remote.savedProxyID != nil {
+            route += "（SSH over Tailscale）"
+        } else if let jumpRemote {
+            route += "（经跳板 \(jumpRemote.name)）"
+        }
+        return route + "\n" + Self.detailedMessage(for: error)
+    }
+
+    static func detailedMessage(for error: Error) -> String {
+        let nsError = error as NSError
+        var parts: [String] = []
+        let localized = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !localized.isEmpty { parts.append(localized) }
+        parts.append("错误类型：\(String(reflecting: type(of: error)))")
+        parts.append("错误域：\(nsError.domain)，代码：\(nsError.code)")
+        if let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError {
+            parts.append("底层错误：\(underlying.domain) \(underlying.code) · \(underlying.localizedDescription)")
+        }
+        return Array(NSOrderedSet(array: parts))
+            .compactMap { $0 as? String }
+            .joined(separator: "\n")
     }
 
     private func resetConnectionResourcesForRetry() async {

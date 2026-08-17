@@ -225,6 +225,9 @@ private enum ShellHarborCLI {
         from source: String,
         to destination: String?
     ) throws {
+        // Resolve an ambiguous local/local pair before decrypting credentials
+        // or starting a saved network proxy.
+        let transfer = try resolveSCPTransfer(from: source, to: destination)
         let profiles = try SHRemoteStore.load()
         var target = try SHRemoteStore.decrypted(
             SHRemoteStore.resolve(selector, in: profiles)
@@ -252,7 +255,6 @@ private enum ShellHarborCLI {
         if let targetTailscale { target.proxyPort = targetTailscale.port }
         if let jumpTailscale { jump?.proxyPort = jumpTailscale.port }
 
-        let transfer = SHSCPTransfer.detect(from: source, to: destination)
         let invocation = try SHSSHCommandBuilder.buildSCP(
             profile: target,
             jumpProfile: jump,
@@ -260,6 +262,27 @@ private enum ShellHarborCLI {
             targetPasswordDescriptor: targetPipe?.readDescriptor,
             jumpPasswordDescriptor: jumpPipe?.readDescriptor
         )
+        let remoteEndpoint = "\(target.resolvedUsername)@\(target.resolvedHost):\(transfer.remotePath)"
+        let transferLog: String
+        switch transfer.direction {
+        case .upload:
+            transferLog = """
+            [SCP] Local → Remote
+              from: \(transfer.localPath)
+              to:   \(remoteEndpoint)
+            [SCP] 开始传输，进度如下：
+
+            """
+        case .download:
+            transferLog = """
+            [SCP] Remote → Local
+              from: \(remoteEndpoint)
+              to:   \(transfer.localPath)
+            [SCP] 开始传输，进度如下：
+
+            """
+        }
+        FileHandle.standardError.write(Data(transferLog.utf8))
         try withExtendedLifetime((
             targetPipe,
             jumpPipe,
@@ -268,5 +291,49 @@ private enum ShellHarborCLI {
         )) {
             try SHProcessExecutor.replaceCurrentProcess(with: invocation)
         }
+    }
+
+    private static func resolveSCPTransfer(
+        from source: String,
+        to destination: String?
+    ) throws -> SHSCPTransfer {
+        guard let destination,
+              SHSCPTransfer.bothEndpointsExistLocally(
+                  from: source,
+                  to: destination
+              ) else {
+            return SHSCPTransfer.detect(from: source, to: destination)
+        }
+
+        guard isatty(STDIN_FILENO) == 1 else {
+            throw SHCLIError.scpDirectionRequired(source, destination)
+        }
+        let prompt = """
+
+        检测到 from 和 to 在本地都存在，请选择复制方向：
+          1. 本地 \(source) → Remote \(destination)
+          2. Remote \(source) → 本地 \(destination)
+        请选择 [1/2]：
+        """
+        FileHandle.standardError.write(Data(prompt.utf8))
+        while let answer = readLine()?.trimmingCharacters(in: .whitespacesAndNewlines) {
+            switch answer {
+            case "1":
+                return SHSCPTransfer.make(
+                    from: source,
+                    to: destination,
+                    direction: .upload
+                )
+            case "2":
+                return SHSCPTransfer.make(
+                    from: source,
+                    to: destination,
+                    direction: .download
+                )
+            default:
+                FileHandle.standardError.write(Data("请输入 1 或 2：".utf8))
+            }
+        }
+        throw SHCLIError.scpDirectionRequired(source, destination)
     }
 }

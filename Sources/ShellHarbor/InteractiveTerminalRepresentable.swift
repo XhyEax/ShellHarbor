@@ -282,6 +282,13 @@ struct InteractiveTerminalRepresentable: NSViewRepresentable {
                 in: view,
                 token: connectionToken
             )
+            // Quick-launch commands attach tmux after the PTY has already
+            // received its initial size. Re-send it once tmux has had time to
+            // become the foreground process.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                [weak view] in
+                view?.reapplyCurrentWindowSize()
+            }
             focusIfActive(view)
         }
 
@@ -391,15 +398,11 @@ final class SteadyCursorTerminalView: LocalProcessTerminalView {
     }
 
     func showTerminalFindBar() {
-        performFindPanelAction(
-            findMenuItem(action: .showFindPanel)
-        )
+        showFindInterface()
     }
 
     func findTerminalMatch(next: Bool) {
-        performFindPanelAction(
-            findMenuItem(action: next ? .next : .previous)
-        )
+        findFromInterface(next: next)
     }
 
     /// Clears only SwiftTerm's local display and scrollback. The child
@@ -538,12 +541,6 @@ final class SteadyCursorTerminalView: LocalProcessTerminalView {
             return true
         }
         return super.performKeyEquivalent(with: event)
-    }
-
-    private func findMenuItem(action: NSFindPanelAction) -> NSMenuItem {
-        let item = NSMenuItem()
-        item.tag = Int(action.rawValue)
-        return item
     }
 
     override func cursorStyleChanged(
