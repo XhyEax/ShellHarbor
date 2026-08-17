@@ -272,6 +272,16 @@ final class SessionWorkspace: ObservableObject, Identifiable {
         hasLoadedRemoteDirectory = true
     }
 
+    func beginRemoteDirectoryLoadIfIdle() -> Bool {
+        guard !isLoadingRemote else { return false }
+        isLoadingRemote = true
+        return true
+    }
+
+    func endRemoteDirectoryLoad() {
+        isLoadingRemote = false
+    }
+
     func rename(to name: String) {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         customName = trimmed.isEmpty ? nil : trimmed

@@ -264,12 +264,12 @@ struct FileTransferView: View {
         .task(id: isAutoRefreshActive) {
             guard isAutoRefreshActive else { return }
             while !Task.isCancelled {
-                await state.automaticallyRefreshFiles(in: workspace)
                 do {
                     try await Task.sleep(for: .seconds(15))
                 } catch {
                     return
                 }
+                await state.automaticallyRefreshFiles(in: workspace)
             }
         }
         .onChange(of: workspace.terminal.state) { _, connectionState in

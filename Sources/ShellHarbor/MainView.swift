@@ -1557,9 +1557,6 @@ private struct ConnectionBar: View {
                 }
             )
             .disabled(!workspace.profile.isConnectable)
-            .task(id: workspace.remoteID) {
-                state.refreshMultiplexerSessions(for: workspace.remoteID)
-            }
 
             Button {
                 state.reconnect()

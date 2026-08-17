@@ -1292,12 +1292,18 @@ final class AppState: ObservableObject {
             !workspace.profile.isLocalConnection,
             workspace.terminal.state == .connected,
             !workspace.hasLoadedRemoteDirectory,
-            !workspace.isLoadingRemote
+            workspace.beginRemoteDirectoryLoadIfIdle()
         else { return }
-        // Avoid racing the independent file-service SSH process against the
-        // interactive SSH handshake that has just started.
-        try? await Task.sleep(for: .milliseconds(500))
-        guard workspace.terminal.state == .connected else { return }
+        // TerminalController reports `.connected` only after OpenSSH has
+        // completed host-key verification and authentication.
+        guard workspace.terminal.state == .connected else {
+            workspace.endRemoteDirectoryLoad()
+            return
+        }
+        // Release immediately before refreshRemote claims the same loading
+        // state. There is no suspension point between these operations on the
+        // main actor, so another startup trigger cannot slip into the gap.
+        workspace.endRemoteDirectoryLoad()
         let defaultPath = workspace.profile.resolvedRemoteFilePath
         let hasRememberedPath = workspace.remotePath != defaultPath
         let restored = await refreshRemote(

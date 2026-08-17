@@ -113,7 +113,8 @@ enum SSHCommandBuilder {
         command: String? = nil,
         forceTTY: Bool = false,
         connectionTimeoutSeconds: Int? = nil,
-        batchMode: Bool = false
+        batchMode: Bool = false,
+        connectionReadyFilePath: String? = nil
     ) throws -> SSHInvocation {
         var sshArguments = commonArguments(for: profile)
         sshArguments += try routeArguments(
@@ -131,6 +132,20 @@ enum SSHCommandBuilder {
         }
         if forceTTY {
             sshArguments.append("-tt")
+        }
+        if
+            let connectionReadyFilePath,
+            !connectionReadyFilePath.isEmpty
+        {
+            // OpenSSH runs LocalCommand only after host-key verification and
+            // authentication have succeeded. The interactive controller uses
+            // this local marker instead of treating a spawned ssh process as
+            // an established remote session.
+            sshArguments += [
+                "-o", "PermitLocalCommand=yes",
+                "-o",
+                "LocalCommand=/usr/bin/touch -- \(shellQuote(connectionReadyFilePath))"
+            ]
         }
         sshArguments.append("\(profile.username)@\(profile.resolvedHost)")
         if let command, !command.isEmpty {

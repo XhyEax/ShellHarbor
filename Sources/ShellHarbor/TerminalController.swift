@@ -92,6 +92,8 @@ final class TerminalController: ObservableObject {
     private var restoredCommandScheduled = false
     private var directoryTracker = RemoteDirectoryTracker()
     private var processDescription = "SSH"
+    private var connectionReadyFileURL: URL?
+    private var connectionReadyTask: Task<Void, Never>?
     private var automaticPasswordResponder:
         TerminalPasswordPromptResponder?
     private var hostKeyPromptDetector = SSHHostKeyPromptDetector()
@@ -293,6 +295,11 @@ final class TerminalController: ObservableObject {
                 )
             } else {
                 processDescription = "SSH"
+                let readyFileURL = FileManager.default.temporaryDirectory
+                    .appendingPathComponent(
+                        "shellharbor-ssh-ready-\(UUID().uuidString)"
+                    )
+                try? FileManager.default.removeItem(at: readyFileURL)
                 let shellCommand = SSHCommandBuilder.interactiveShellCommand(
                     startingDirectory: directoryTracker.currentDirectory,
                     startupCommand: startupCommand
@@ -301,8 +308,10 @@ final class TerminalController: ObservableObject {
                     profile: profile,
                     jumpProfile: jumpProfile,
                     command: shellCommand,
-                    forceTTY: true
+                    forceTTY: true,
+                    connectionReadyFilePath: readyFileURL.path
                 )
+                connectionReadyFileURL = readyFileURL
             }
             invocation = newInvocation
             if
@@ -342,11 +351,16 @@ final class TerminalController: ObservableObject {
 
     func processStarted(for token: UUID) {
         guard token == connectionToken, invocation != nil else { return }
+        guard connectionReadyFileURL == nil else {
+            waitForSSHConnectionReady(for: token)
+            return
+        }
         state = .connected
     }
 
     func processTerminated(exitCode: Int32?, for token: UUID) {
         guard token == connectionToken else { return }
+        clearConnectionReadyMarker()
         let outputSummary = retainedTerminalView.flatMap { view -> String? in
             let data = view.getTerminal().getBufferAsData(kind: .normal)
             guard let output = String(data: data, encoding: .utf8) else {
@@ -438,6 +452,7 @@ final class TerminalController: ObservableObject {
     }
 
     func disconnect(appendMessage: Bool = true) {
+        clearConnectionReadyMarker()
         automaticPasswordResponder = nil
         hostKeyConfirmation = nil
         hostKeyPromptDetector = SSHHostKeyPromptDetector()
@@ -450,6 +465,41 @@ final class TerminalController: ObservableObject {
         processDelegateBridge = nil
         invocation = nil
         state = .disconnected
+    }
+
+    private func waitForSSHConnectionReady(for token: UUID) {
+        connectionReadyTask?.cancel()
+        connectionReadyTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                guard
+                    let self,
+                    token == self.connectionToken,
+                    self.invocation != nil,
+                    let readyFileURL = self.connectionReadyFileURL
+                else { return }
+                if FileManager.default.fileExists(atPath: readyFileURL.path) {
+                    try? FileManager.default.removeItem(at: readyFileURL)
+                    self.connectionReadyFileURL = nil
+                    self.connectionReadyTask = nil
+                    self.state = .connected
+                    return
+                }
+                do {
+                    try await Task.sleep(for: .milliseconds(50))
+                } catch {
+                    return
+                }
+            }
+        }
+    }
+
+    private func clearConnectionReadyMarker() {
+        connectionReadyTask?.cancel()
+        connectionReadyTask = nil
+        if let connectionReadyFileURL {
+            try? FileManager.default.removeItem(at: connectionReadyFileURL)
+        }
+        connectionReadyFileURL = nil
     }
 }
 

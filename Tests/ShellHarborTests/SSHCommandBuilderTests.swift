@@ -681,6 +681,23 @@ final class SSHCommandBuilderTests: XCTestCase {
         XCTAssertTrue(invocation.arguments.contains("BatchMode=yes"))
     }
 
+    func testInteractiveSSHCanSignalSuccessfulAuthentication() throws {
+        var profile = SessionProfile()
+        profile.host = "example.com"
+        profile.username = "alice"
+
+        let invocation = try SSHCommandBuilder.ssh(
+            profile: profile,
+            forceTTY: true,
+            connectionReadyFilePath: "/tmp/shellharbor-ready-test"
+        )
+
+        XCTAssertTrue(invocation.arguments.contains("PermitLocalCommand=yes"))
+        XCTAssertTrue(invocation.arguments.contains(
+            "LocalCommand=/usr/bin/touch -- '/tmp/shellharbor-ready-test'"
+        ))
+    }
+
     func testAuthenticationFailuresDoNotMeanInspectionOffline() {
         XCTAssertFalse(InspectionService.isConnectivityFailure(
             "Permission denied, please try again."
@@ -2131,6 +2148,27 @@ final class SSHCommandBuilderTests: XCTestCase {
         first.mode = .files
         XCTAssertEqual(second.remotePath, "/srv/second")
         XCTAssertEqual(second.mode, .terminal)
+    }
+
+    @MainActor
+    func testRemoteDirectoryInitialLoadIsReservedBeforeDelay() {
+        var profile = SessionProfile()
+        profile.host = "example.com"
+        profile.username = "alice"
+        let workspace = SessionWorkspace(profile: profile)
+
+        let firstReservation = workspace.beginRemoteDirectoryLoadIfIdle()
+        let loadingAfterFirstReservation = workspace.isLoadingRemote
+        let overlappingReservation = workspace.beginRemoteDirectoryLoadIfIdle()
+        XCTAssertTrue(firstReservation)
+        XCTAssertTrue(loadingAfterFirstReservation)
+        XCTAssertFalse(overlappingReservation)
+
+        workspace.endRemoteDirectoryLoad()
+        let loadingAfterRelease = workspace.isLoadingRemote
+        let reservationAfterRelease = workspace.beginRemoteDirectoryLoadIfIdle()
+        XCTAssertFalse(loadingAfterRelease)
+        XCTAssertTrue(reservationAfterRelease)
     }
 
     @MainActor
