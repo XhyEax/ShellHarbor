@@ -748,6 +748,16 @@ final class AppState: ObservableObject {
         workspace.terminal.onRestorationChanged = { [weak self] in
             self?.scheduleSessionRestorationSave()
         }
+        workspace.terminal.onCommandSubmitted = { [weak workspace] command in
+            LocalCommandHistoryStore.record(command, for: remoteID)
+            guard
+                let workspace,
+                workspace.commandHistorySource == .local
+            else { return }
+            workspace.commandHistory = LocalCommandHistoryStore.load(
+                for: remoteID
+            )
+        }
         workspaces[workspace.id] = workspace
         activeWorkspaceIDs.append(workspace.id)
         if shouldSelect {
@@ -1137,11 +1147,27 @@ final class AppState: ObservableObject {
     func refreshCommandHistory(in workspace: SessionWorkspace) async {
         workspace.isLoadingCommandHistory = true
         defer { workspace.isLoadingCommandHistory = false }
+        if workspace.connectionProfile.isLocalConnection {
+            workspace.commandHistorySource = .local
+            workspace.commandHistory = LocalCommandHistoryStore.load(
+                for: workspace.remoteID
+            )
+            return
+        }
         do {
-            workspace.commandHistory = try await RemoteHistoryService.load(
+            let remoteHistory = try await RemoteHistoryService.load(
                 profile: workspace.connectionProfile,
                 jumpProfile: workspace.connectionJumpProfile
             )
+            if remoteHistory.isEmpty {
+                workspace.commandHistorySource = .local
+                workspace.commandHistory = LocalCommandHistoryStore.load(
+                    for: workspace.remoteID
+                )
+            } else {
+                workspace.commandHistorySource = .remote
+                workspace.commandHistory = remoteHistory
+            }
         } catch {
             notice = "远程命令历史读取失败：\(error.localizedDescription)"
         }

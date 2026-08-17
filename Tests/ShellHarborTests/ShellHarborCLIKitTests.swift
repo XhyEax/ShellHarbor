@@ -56,6 +56,8 @@ final class ShellHarborCLIKitTests: XCTestCase {
             invocation.arguments.joined(separator: " ")
                 .contains("target-secret")
         )
+        XCTAssertTrue(invocation.arguments.contains("IdentitiesOnly=yes"))
+        XCTAssertTrue(invocation.arguments.contains("PubkeyAuthentication=no"))
     }
 
     func testTargetAndJumpPasswordsUseSeparateDescriptors() throws {
@@ -85,6 +87,8 @@ final class ShellHarborCLIKitTests: XCTestCase {
 
         XCTAssertEqual(Array(invocation.arguments.prefix(2)), ["-d", "42"])
         XCTAssertTrue(command.contains("'-d' '43'"))
+        XCTAssertTrue(command.contains("'IdentitiesOnly=yes'"))
+        XCTAssertTrue(command.contains("'PubkeyAuthentication=no'"))
         XCTAssertFalse(command.contains("target-secret"))
         XCTAssertFalse(command.contains("jump-secret"))
     }
@@ -311,6 +315,32 @@ final class ShellHarborCLIKitTests: XCTestCase {
             invocation.arguments.suffix(2),
             ["/tmp/report.txt", "deploy@example.com:~/reports/report.txt"]
         )
+    }
+
+    func testPasswordSCPDisablesPublicKeyAuthentication() throws {
+        guard SHSSHCommandBuilder.sshpassPath() != nil else {
+            throw XCTSkip("当前环境未安装 sshpass")
+        }
+        let remote = try profile(
+            name: "Password Files",
+            authentication: "password",
+            password: "target-secret"
+        )
+        let invocation = try SHSSHCommandBuilder.buildSCP(
+            profile: remote,
+            jumpProfile: nil,
+            transfer: SHSCPTransfer(
+                localPath: "/tmp/report.txt",
+                remotePath: "~/reports/report.txt",
+                direction: .upload
+            ),
+            targetPasswordDescriptor: 42,
+            jumpPasswordDescriptor: nil
+        )
+
+        XCTAssertTrue(invocation.arguments.contains("IdentitiesOnly=yes"))
+        XCTAssertTrue(invocation.arguments.contains("PubkeyAuthentication=no"))
+        XCTAssertFalse(invocation.arguments.contains("target-secret"))
     }
 
     private func profile(

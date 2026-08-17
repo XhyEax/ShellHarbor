@@ -17,7 +17,10 @@ struct CommandHistoryView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Label("远程命令历史", systemImage: "clock.arrow.circlepath")
+                Label(
+                    workspace.commandHistorySource.title,
+                    systemImage: "clock.arrow.circlepath"
+                )
                     .font(.headline)
                 Spacer()
                 if workspace.isLoadingCommandHistory {
@@ -37,7 +40,7 @@ struct CommandHistoryView: View {
                 Image(systemName: "magnifyingglass")
                     .foregroundStyle(.secondary)
                 TextField(
-                    "搜索远程命令",
+                    workspace.commandHistorySource.searchPrompt,
                     text: $workspace.commandHistorySearch
                 )
                 .textFieldStyle(.plain)
@@ -71,7 +74,11 @@ struct CommandHistoryView: View {
                 ContentUnavailableView(
                     workspace.commandHistorySearch.isEmpty ? "没有历史记录" : "没有匹配命令",
                     systemImage: "clock",
-                    description: Text("支持读取远端 zsh、bash 和 fish 的历史文件。")
+                    description: Text(
+                        workspace.commandHistorySource == .local
+                            ? "该 Remote 暂无 ShellHarbor 本地命令历史。"
+                            : "支持读取远端 zsh、bash 和 fish 的历史文件；远端为空时显示本地历史。"
+                    )
                 )
             } else {
                 List(filteredEntries) { entry in

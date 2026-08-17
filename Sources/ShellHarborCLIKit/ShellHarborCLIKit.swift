@@ -771,6 +771,7 @@ public enum SHSSHCommandBuilder {
         }
         var arguments = ["-P", String(profile.resolvedPort)]
         arguments += hostKeyArguments(for: profile)
+        arguments += authenticationArguments(for: profile)
         arguments += try routeArguments(
             profile: profile,
             jumpProfile: jumpProfile,
@@ -779,16 +780,6 @@ public enum SHSSHCommandBuilder {
         let keepAlive = profile.keepAliveSeconds ?? 30
         if keepAlive > 0 {
             arguments += ["-o", "ServerAliveInterval=\(keepAlive)"]
-        }
-        if
-            profile.resolvedAuthentication == "privateKey",
-            let keyPath = profile.privateKeyPath,
-            !keyPath.isEmpty
-        {
-            arguments += [
-                "-i",
-                NSString(string: keyPath).expandingTildeInPath
-            ]
         }
         arguments.append("-r")
         let remote = "\(profile.resolvedUsername)@\(profile.resolvedHost):\(transfer.remotePath)"
@@ -831,6 +822,7 @@ public enum SHSSHCommandBuilder {
     ) -> [String] {
         var arguments = ["-p", String(profile.resolvedPort)]
         arguments += hostKeyArguments(for: profile)
+        arguments += authenticationArguments(for: profile)
         let keepAlive = profile.keepAliveSeconds ?? 30
         if keepAlive > 0 {
             arguments += [
@@ -838,17 +830,32 @@ public enum SHSSHCommandBuilder {
                 "-o", "ServerAliveCountMax=3"
             ]
         }
+        return arguments
+    }
+
+    private static func authenticationArguments(
+        for profile: SHRemoteProfile
+    ) -> [String] {
+        if profile.usesPassword {
+            return [
+                "-o", "IdentitiesOnly=yes",
+                "-o", "PubkeyAuthentication=no",
+                "-o", "PasswordAuthentication=yes",
+                "-o", "KbdInteractiveAuthentication=yes",
+                "-o", "PreferredAuthentications=password,keyboard-interactive"
+            ]
+        }
         if
             profile.resolvedAuthentication == "privateKey",
             let keyPath = profile.privateKeyPath,
             !keyPath.isEmpty
         {
-            arguments += [
+            return [
                 "-i",
                 NSString(string: keyPath).expandingTildeInPath
             ]
         }
-        return arguments
+        return []
     }
 
     private static func hostKeyArguments(

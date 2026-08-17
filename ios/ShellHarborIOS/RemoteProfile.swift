@@ -921,6 +921,7 @@ final class MobileSession: Identifiable {
     let sessionNumber: Int
     var nameSuffix: String?
     var commandHistory: [MobileCommandHistoryEntry] = []
+    var commandHistorySource = MobileCommandHistorySource.remote
     var commandHistorySearch = ""
     var isLoadingCommandHistory = false
     var selectedView = ViewMode.terminal {
@@ -992,6 +993,12 @@ final class MobileSession: Identifiable {
             defaultPath: remote.remoteStartPath
         )
         localFileBrowser = MobileLocalFileBrowser(remoteID: remote.id, relativePath: restoredLocalPath)
+        controller.onCommandSubmitted = { command in
+            MobileLocalCommandHistoryStore.record(
+                command,
+                for: remote.id
+            )
+        }
     }
 
     var displayName: String {

@@ -431,15 +431,13 @@ enum SSHCommandBuilder {
     ) throws -> SSHInvocation {
         var arguments = ["-P", String(profile.port)]
         arguments += hostKeyArguments(for: profile)
+        arguments += authenticationArguments(for: profile)
         arguments += try routeArguments(
             profile: profile,
             jumpProfile: jumpProfile
         )
         if profile.keepAliveSeconds > 0 {
             arguments += ["-o", "ServerAliveInterval=\(profile.keepAliveSeconds)"]
-        }
-        if profile.authentication == .privateKey, !profile.privateKeyPath.isEmpty {
-            arguments += ["-i", profile.privateKeyPath]
         }
         if recursive {
             arguments.append("-r")
@@ -507,16 +505,37 @@ enum SSHCommandBuilder {
     private static func commonArguments(for profile: SessionProfile) -> [String] {
         var arguments = ["-p", String(profile.port)]
         arguments += hostKeyArguments(for: profile)
+        arguments += authenticationArguments(for: profile)
         if profile.keepAliveSeconds > 0 {
             arguments += [
                 "-o", "ServerAliveInterval=\(profile.keepAliveSeconds)",
                 "-o", "ServerAliveCountMax=3"
             ]
         }
-        if profile.authentication == .privateKey, !profile.privateKeyPath.isEmpty {
-            arguments += ["-i", profile.privateKeyPath]
-        }
         return arguments
+    }
+
+    private static func authenticationArguments(
+        for profile: SessionProfile
+    ) -> [String] {
+        switch profile.authentication {
+        case .password:
+            // A busy SSH agent can exhaust the server's MaxAuthTries before
+            // sshpass gets a password prompt. Selecting password auth is an
+            // explicit request to skip all public-key identities.
+            return [
+                "-o", "IdentitiesOnly=yes",
+                "-o", "PubkeyAuthentication=no",
+                "-o", "PasswordAuthentication=yes",
+                "-o", "KbdInteractiveAuthentication=yes",
+                "-o", "PreferredAuthentications=password,keyboard-interactive"
+            ]
+        case .privateKey:
+            guard !profile.privateKeyPath.isEmpty else { return [] }
+            return ["-i", profile.privateKeyPath]
+        case .agent:
+            return []
+        }
     }
 
     private static func hostKeyArguments(

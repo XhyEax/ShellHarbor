@@ -97,6 +97,7 @@ final class TerminalController: ObservableObject {
     private var hostKeyPromptDetector = SSHHostKeyPromptDetector()
 
     var onRestorationChanged: (() -> Void)?
+    var onCommandSubmitted: ((String) -> Void)?
     private(set) var scrollbackLines =
         TerminalScrollbackSettings.defaultLines
 
@@ -167,6 +168,7 @@ final class TerminalController: ObservableObject {
         let commands = pendingInput.record(bytes)
         for command in commands {
             directoryTracker.record(command: command)
+            onCommandSubmitted?(command)
         }
         onRestorationChanged?()
     }

@@ -49,7 +49,7 @@ private struct TerminalPanel: View {
                         Image(systemName: "clock.arrow.circlepath")
                     }
                     .buttonStyle(.borderless)
-                    .help("远程命令历史")
+                    .help("命令历史")
                     .disabled(controller.state != .connected)
                     .popover(
                         isPresented: $workspace.showingCommandHistory,

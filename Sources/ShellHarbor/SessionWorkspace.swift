@@ -132,6 +132,7 @@ final class SessionWorkspace: ObservableObject, Identifiable {
     @Published var isLoadingLocal = false
     @Published var isLoadingRemote = false
     @Published var commandHistory: [CommandHistoryEntry] = []
+    @Published var commandHistorySource: CommandHistorySource = .remote
     @Published var commandHistorySearch = ""
     @Published var showingCommandHistory = false
     @Published var isLoadingCommandHistory = false

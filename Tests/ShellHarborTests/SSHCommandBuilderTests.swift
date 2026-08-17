@@ -318,8 +318,55 @@ final class SSHCommandBuilderTests: XCTestCase {
         XCTAssertEqual(input.text, "echo hello")
         XCTAssertTrue(input.isReliable)
 
-        input.record([0x0D])
+        let submitted = input.record([0x0D])
+        XCTAssertEqual(submitted, ["echo hello"])
         XCTAssertEqual(input.text, "")
+    }
+
+    func testLocalCommandHistoryIsPersistedPerRemoteAndDeduplicated() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let fileURL = directory.appendingPathComponent("history.json")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let firstRemote = UUID()
+        let secondRemote = UUID()
+        let firstDate = Date(timeIntervalSince1970: 1_700_000_000)
+        let secondDate = Date(timeIntervalSince1970: 1_700_000_100)
+
+        LocalCommandHistoryStore.record(
+            "pwd",
+            for: firstRemote,
+            date: firstDate,
+            fileURL: fileURL
+        )
+        LocalCommandHistoryStore.record(
+            "ls -la",
+            for: secondRemote,
+            date: firstDate,
+            fileURL: fileURL
+        )
+        LocalCommandHistoryStore.record(
+            "  pwd  ",
+            for: firstRemote,
+            date: secondDate,
+            fileURL: fileURL
+        )
+
+        let firstHistory = LocalCommandHistoryStore.load(
+            for: firstRemote,
+            fileURL: fileURL
+        )
+        let secondHistory = LocalCommandHistoryStore.load(
+            for: secondRemote,
+            fileURL: fileURL
+        )
+        XCTAssertEqual(firstHistory.map(\.command), ["pwd"])
+        XCTAssertEqual(firstHistory.first?.date, secondDate)
+        XCTAssertEqual(secondHistory.map(\.command), ["ls -la"])
+        let permissions = try FileManager.default.attributesOfItem(
+            atPath: fileURL.path
+        )[.posixPermissions] as? NSNumber
+        XCTAssertEqual(permissions?.intValue, 0o600)
     }
 
     func testPendingTerminalInputRejectsUnknownHistoryRecall() {
@@ -771,6 +818,13 @@ final class SSHCommandBuilderTests: XCTestCase {
         XCTAssertFalse(invocation.displayCommand.contains("jump-secret"))
         XCTAssertFalse(invocation.arguments.contains("target-secret"))
         XCTAssertFalse(invocation.arguments.contains("jump-secret"))
+        let proxyCommand = try XCTUnwrap(
+            invocation.arguments.first(where: {
+                $0.hasPrefix("ProxyCommand=")
+            })
+        )
+        XCTAssertTrue(proxyCommand.contains("'IdentitiesOnly=yes'"))
+        XCTAssertTrue(proxyCommand.contains("'PubkeyAuthentication=no'"))
     }
 
     func testSOCKS5ProxyIsAppliedToSSH() throws {
@@ -1413,6 +1467,36 @@ final class SSHCommandBuilderTests: XCTestCase {
         XCTAssertFalse(invocation.arguments.contains("super-secret"))
         XCTAssertFalse(invocation.displayCommand.contains("super-secret"))
         XCTAssertTrue(invocation.arguments.starts(with: ["-e", "/usr/bin/ssh"]))
+        XCTAssertTrue(invocation.arguments.contains("IdentitiesOnly=yes"))
+        XCTAssertTrue(invocation.arguments.contains("PubkeyAuthentication=no"))
+        XCTAssertTrue(invocation.arguments.contains("PasswordAuthentication=yes"))
+        XCTAssertTrue(invocation.arguments.contains("KbdInteractiveAuthentication=yes"))
+        XCTAssertTrue(invocation.arguments.contains(
+            "PreferredAuthentications=password,keyboard-interactive"
+        ))
+    }
+
+    func testPasswordSCPDisablesPublicKeyAuthentication() throws {
+        guard SSHCommandBuilder.sshpassPath() != nil else {
+            throw XCTSkip("sshpass is not installed")
+        }
+        var profile = SessionProfile()
+        profile.host = "example.com"
+        profile.username = "alice"
+        profile.authentication = .password
+        profile.password = "super-secret"
+
+        let invocation = try SSHCommandBuilder.scp(
+            profile: profile,
+            localPath: "/tmp/report.txt",
+            remotePath: "~/report.txt",
+            direction: .upload,
+            recursive: false
+        )
+
+        XCTAssertTrue(invocation.arguments.contains("IdentitiesOnly=yes"))
+        XCTAssertTrue(invocation.arguments.contains("PubkeyAuthentication=no"))
+        XCTAssertFalse(invocation.arguments.contains("super-secret"))
     }
 
     func testPasswordCipherUsesRSAAndRoundTrips() throws {

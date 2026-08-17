@@ -36,7 +36,9 @@ private struct MobilePendingTerminalInput {
         isReliable = true
     }
 
-    mutating func record(_ bytes: [UInt8]) {
+    @discardableResult
+    mutating func record(_ bytes: [UInt8]) -> [String] {
+        var submittedCommands: [String] = []
         var index = 0
         while index < bytes.count {
             let byte = bytes[index]
@@ -51,6 +53,15 @@ private struct MobilePendingTerminalInput {
             }
             switch byte {
             case 0x0A, 0x0D, 0x03:
+                if
+                    byte != 0x03,
+                    isReliable,
+                    !text.trimmingCharacters(
+                        in: .whitespacesAndNewlines
+                    ).isEmpty
+                {
+                    submittedCommands.append(text)
+                }
                 clear()
                 index += 1
             case 0x7F, 0x08:
@@ -87,6 +98,7 @@ private struct MobilePendingTerminalInput {
                 insert(String(decoding: bytes[start..<index], as: UTF8.self))
             }
         }
+        return submittedCommands
     }
 
     private mutating func handleEscapeSequence(_ bytes: [UInt8]) -> Int? {
@@ -323,6 +335,7 @@ final class MobileSSHController {
     @ObservationIgnored private var outputHandler: (@MainActor ([UInt8]) -> Void)?
     @ObservationIgnored private var outputHistory: [UInt8] = []
     @ObservationIgnored private var pendingInput = MobilePendingTerminalInput()
+    @ObservationIgnored var onCommandSubmitted: ((String) -> Void)?
     @ObservationIgnored private var restoredPendingCommand: String?
     @ObservationIgnored private var restoredInputTask: Task<Void, Never>?
     @ObservationIgnored private var startupCommandTask: Task<Void, Never>?
@@ -792,7 +805,10 @@ final class MobileSSHController {
     }
 
     func send(_ bytes: ArraySlice<UInt8>) {
-        pendingInput.record(Array(bytes))
+        let commands = pendingInput.record(Array(bytes))
+        for command in commands {
+            onCommandSubmitted?(command)
+        }
         onRestorationChanged?()
         sendWithoutTracking(bytes)
     }

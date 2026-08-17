@@ -1,9 +1,109 @@
 import Foundation
 
+enum MobileCommandHistorySource: Equatable {
+    case remote
+    case local
+
+    var title: String {
+        switch self {
+        case .remote: "远程命令历史"
+        case .local: "本地命令历史"
+        }
+    }
+
+    var searchPrompt: String {
+        switch self {
+        case .remote: "搜索远程命令"
+        case .local: "搜索本地命令"
+        }
+    }
+}
+
 struct MobileCommandHistoryEntry: Identifiable, Hashable {
     let id = UUID()
     let command: String
     let date: Date?
+}
+
+private struct MobileLocalCommandHistoryRecord: Codable {
+    let command: String
+    let date: Date
+}
+
+enum MobileLocalCommandHistoryStore {
+    private struct Archive: Codable {
+        var recordsByRemote: [String: [MobileLocalCommandHistoryRecord]] = [:]
+    }
+
+    private static let maximumEntriesPerRemote = 300
+
+    private static var fileURL: URL {
+        let directory = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        )[0].appendingPathComponent("ShellHarbor", isDirectory: true)
+        return directory.appendingPathComponent("local-command-history.json")
+    }
+
+    static func load(for remoteID: UUID) -> [MobileCommandHistoryEntry] {
+        let records = loadArchive().recordsByRemote[remoteID.uuidString] ?? []
+        return records.map {
+            MobileCommandHistoryEntry(command: $0.command, date: $0.date)
+        }
+    }
+
+    static func record(
+        _ command: String,
+        for remoteID: UUID,
+        date: Date = Date()
+    ) {
+        let normalized = command.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        guard !normalized.isEmpty else { return }
+
+        var archive = loadArchive()
+        var records = archive.recordsByRemote[remoteID.uuidString] ?? []
+        records.removeAll { $0.command == normalized }
+        records.insert(
+            MobileLocalCommandHistoryRecord(
+                command: normalized,
+                date: date
+            ),
+            at: 0
+        )
+        if records.count > maximumEntriesPerRemote {
+            records.removeLast(records.count - maximumEntriesPerRemote)
+        }
+        archive.recordsByRemote[remoteID.uuidString] = records
+        save(archive)
+    }
+
+    private static func loadArchive() -> Archive {
+        guard
+            let data = try? Data(contentsOf: fileURL),
+            let archive = try? JSONDecoder().decode(Archive.self, from: data)
+        else {
+            return Archive()
+        }
+        return archive
+    }
+
+    private static func save(_ archive: Archive) {
+        let directory = fileURL.deletingLastPathComponent()
+        try? FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        guard let data = try? encoder.encode(archive) else { return }
+        do {
+            try data.write(to: fileURL, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+        } catch {
+            return
+        }
+    }
 }
 
 enum MobileRemoteHistoryService {

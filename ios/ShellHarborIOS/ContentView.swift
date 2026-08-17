@@ -2408,7 +2408,11 @@ private struct MobileCommandHistoryView: View {
                     ContentUnavailableView(
                         session.commandHistorySearch.isEmpty ? "没有历史记录" : "没有匹配命令",
                         systemImage: "clock",
-                        description: Text("支持读取远端 zsh、bash 和 fish 的历史文件。")
+                        description: Text(
+                            session.commandHistorySource == .local
+                                ? "该 Remote 暂无 ShellHarbor 本地命令历史。"
+                                : "支持读取远端 zsh、bash 和 fish 的历史文件；远端为空时显示本地历史。"
+                        )
                     )
                 }
             }
@@ -2417,9 +2421,9 @@ private struct MobileCommandHistoryView: View {
                     get: { session.commandHistorySearch },
                     set: { session.commandHistorySearch = $0 }
                 ),
-                prompt: "搜索远程命令"
+                prompt: session.commandHistorySource.searchPrompt
             )
-            .navigationTitle("远程命令历史")
+            .navigationTitle(session.commandHistorySource.title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -2439,7 +2443,16 @@ private struct MobileCommandHistoryView: View {
         session.isLoadingCommandHistory = true
         errorMessage = nil
         do {
-            session.commandHistory = try await session.controller.loadCommandHistory()
+            let remoteHistory = try await session.controller.loadCommandHistory()
+            if remoteHistory.isEmpty {
+                session.commandHistorySource = .local
+                session.commandHistory = MobileLocalCommandHistoryStore.load(
+                    for: session.remote.id
+                )
+            } else {
+                session.commandHistorySource = .remote
+                session.commandHistory = remoteHistory
+            }
         } catch {
             errorMessage = error.localizedDescription
         }
