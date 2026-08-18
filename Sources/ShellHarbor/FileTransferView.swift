@@ -1139,7 +1139,10 @@ private struct FilePane: View {
         else {
             return
         }
-        proxy.scrollTo(selectedID, anchor: .center)
+        // Keep programmatic selections visible (for example when a path field
+        // points to a file) without recentering rows the user clicks in the
+        // already-visible portion of the list.
+        proxy.scrollTo(selectedID)
     }
 
     @ViewBuilder
