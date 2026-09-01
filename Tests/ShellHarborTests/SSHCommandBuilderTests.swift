@@ -244,6 +244,56 @@ final class SSHCommandBuilderTests: XCTestCase {
         )
     }
 
+    func testLocalDownloadCollisionIncludesExistingAndReservedNames() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try Data().write(
+            to: directory.appendingPathComponent("existing.txt")
+        )
+
+        let entries = [
+            FileEntry(
+                name: "existing.txt",
+                path: "/remote/existing.txt",
+                isDirectory: false,
+                size: 1,
+                modifiedAt: nil
+            ),
+            FileEntry(
+                name: "queued.txt",
+                path: "/remote/queued.txt",
+                isDirectory: false,
+                size: 1,
+                modifiedAt: nil
+            ),
+            FileEntry(
+                name: "available.txt",
+                path: "/remote/available.txt",
+                isDirectory: false,
+                size: 1,
+                modifiedAt: nil
+            )
+        ]
+        let reserved = Set([
+            directory.appendingPathComponent("queued.txt")
+                .standardizedFileURL.path.lowercased()
+        ])
+
+        XCTAssertEqual(
+            LocalDownloadCollisionResolver.conflictingNames(
+                for: entries,
+                in: directory,
+                reservedDestinations: reserved
+            ),
+            ["existing.txt", "queued.txt"]
+        )
+    }
+
     func testOnlyActiveTransfersReserveCollisionDestination() {
         XCTAssertTrue(TransferStatus.queued.reservesDestination)
         XCTAssertTrue(TransferStatus.running.reservesDestination)

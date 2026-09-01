@@ -2,6 +2,18 @@ import SwiftUI
 import UniformTypeIdentifiers
 import CoreLocation
 
+private enum MobileBackgroundKeepAliveSettings {
+    static let defaultMaxMinutes = 15
+    static let allowedMaxMinutes = 5...1_440
+
+    static func normalizedMaxMinutes(_ minutes: Int) -> Int {
+        min(
+            max(minutes, allowedMaxMinutes.lowerBound),
+            allowedMaxMinutes.upperBound
+        )
+    }
+}
+
 @MainActor
 private final class MobileBackgroundLocationKeeper: NSObject,
     @preconcurrency CLLocationManagerDelegate {
@@ -172,10 +184,15 @@ struct ContentView: View {
     @AppStorage("mobileSelectedSessionID") private var selectedSessionID = ""
     @AppStorage("mobileBackgroundKeepAliveEnabled")
     private var backgroundKeepAliveEnabled = false
+    @AppStorage("mobileBackgroundKeepAliveMaxMinutes")
+    private var backgroundKeepAliveMaxMinutes =
+        MobileBackgroundKeepAliveSettings.defaultMaxMinutes
     @State private var requestedSessionID: UUID?
     @State private var suspendedConnectionIDs = Set<UUID>()
     @State private var backgroundLocationKeeper =
         MobileBackgroundLocationKeeper()
+    @State private var backgroundKeepAliveStartedAt: Date?
+    @State private var backgroundKeepAliveTimeoutTask: Task<Void, Never>?
 
     private var selectedTab: Binding<IOSRootTab> {
         Binding(
@@ -232,7 +249,7 @@ struct ContentView: View {
             #endif
         }
         .onChange(of: scenePhase) { _, phase in
-            if phase != .active {
+            if phase == .background {
                 if suspendedConnectionIDs.isEmpty {
                     suspendedConnectionIDs = Set(
                         remoteStore.sessions
@@ -243,9 +260,14 @@ struct ContentView: View {
                     if backgroundKeepAliveEnabled,
                        !suspendedConnectionIDs.isEmpty {
                         backgroundLocationKeeper.start()
+                        scheduleBackgroundKeepAliveTimeout()
                     }
                 }
-            } else {
+            } else if phase == .active {
+                if hasBackgroundKeepAliveExpired {
+                    expireBackgroundKeepAlive()
+                }
+                cancelBackgroundKeepAliveTimeout()
                 backgroundLocationKeeper.stop()
                 remoteStore.resumeSessionsAfterSuspension(
                     suspendedConnectionIDs
@@ -255,27 +277,54 @@ struct ContentView: View {
         }
         .onChange(of: remoteStore.sessions.map(\.controller.hasConnectionIntent)) {
             _, intents in
-            guard backgroundKeepAliveEnabled, intents.contains(true) else {
+            guard backgroundKeepAliveEnabled else {
                 backgroundLocationKeeper.stop()
+                cancelBackgroundKeepAliveTimeout()
+                return
+            }
+            guard intents.contains(true) else {
+                suspendedConnectionIDs.removeAll()
+                backgroundLocationKeeper.stop()
+                cancelBackgroundKeepAliveTimeout()
                 return
             }
             if scenePhase == .active {
                 backgroundLocationKeeper.prepareAuthorization()
-            } else {
+            } else if scenePhase == .background {
+                suspendedConnectionIDs = Set(
+                    remoteStore.sessions
+                        .filter(\.controller.hasConnectionIntent)
+                        .map(\.id)
+                )
                 backgroundLocationKeeper.start()
+                scheduleBackgroundKeepAliveTimeout(
+                    preservingStartTime: backgroundKeepAliveStartedAt != nil
+                )
             }
         }
         .onChange(of: backgroundKeepAliveEnabled) { _, enabled in
             guard enabled else {
                 backgroundLocationKeeper.stop()
+                cancelBackgroundKeepAliveTimeout()
                 return
             }
             if scenePhase == .active {
                 backgroundLocationKeeper.prepareAuthorization()
-            } else if scenePhase != .active,
+            } else if scenePhase == .background,
                       !suspendedConnectionIDs.isEmpty {
                 backgroundLocationKeeper.start()
+                scheduleBackgroundKeepAliveTimeout()
             }
+        }
+        .onChange(of: backgroundKeepAliveMaxMinutes) { _, _ in
+            guard
+                scenePhase == .background,
+                backgroundKeepAliveEnabled,
+                !suspendedConnectionIDs.isEmpty
+            else {
+                return
+            }
+            scheduleBackgroundKeepAliveTimeout(preservingStartTime: true)
         }
         .task(id: scenePhase) {
             guard scenePhase == .active else { return }
@@ -291,6 +340,66 @@ struct ContentView: View {
                 }
             }
         }
+    }
+
+    private func scheduleBackgroundKeepAliveTimeout(
+        preservingStartTime: Bool = false
+    ) {
+        backgroundKeepAliveTimeoutTask?.cancel()
+        let startedAt = preservingStartTime
+            ? (backgroundKeepAliveStartedAt ?? Date())
+            : Date()
+        backgroundKeepAliveStartedAt = startedAt
+        let minutes = MobileBackgroundKeepAliveSettings.normalizedMaxMinutes(
+            backgroundKeepAliveMaxMinutes
+        )
+        let deadline = startedAt.addingTimeInterval(
+            TimeInterval(minutes * 60)
+        )
+        backgroundKeepAliveTimeoutTask = Task { @MainActor in
+            let remaining = max(0, deadline.timeIntervalSinceNow)
+            do {
+                try await Task.sleep(for: .seconds(remaining))
+            } catch {
+                return
+            }
+            guard
+                scenePhase == .background,
+                backgroundKeepAliveEnabled
+            else {
+                return
+            }
+            expireBackgroundKeepAlive()
+        }
+    }
+
+    private var hasBackgroundKeepAliveExpired: Bool {
+        guard let backgroundKeepAliveStartedAt else { return false }
+        let minutes = MobileBackgroundKeepAliveSettings.normalizedMaxMinutes(
+            backgroundKeepAliveMaxMinutes
+        )
+        return Date().timeIntervalSince(backgroundKeepAliveStartedAt) >=
+            TimeInterval(minutes * 60)
+    }
+
+    private func expireBackgroundKeepAlive() {
+        let connectedIDs = Set(
+            remoteStore.sessions
+                .filter(\.controller.hasConnectionIntent)
+                .map(\.id)
+        )
+        remoteStore.suspendSessions(connectedIDs)
+        suspendedConnectionIDs.removeAll()
+        remoteStore.persistSessionRestoration()
+        backgroundLocationKeeper.stop()
+        backgroundKeepAliveStartedAt = nil
+        backgroundKeepAliveTimeoutTask = nil
+    }
+
+    private func cancelBackgroundKeepAliveTimeout() {
+        backgroundKeepAliveTimeoutTask?.cancel()
+        backgroundKeepAliveTimeoutTask = nil
+        backgroundKeepAliveStartedAt = nil
     }
 }
 
@@ -2495,6 +2604,9 @@ private struct IOSSettingsView: View {
     @AppStorage("mobileTerminalScrollbackLines") private var terminalScrollbackLines = MobileTerminalScrollbackSettings.defaultLines
     @AppStorage("mobileBackgroundKeepAliveEnabled")
     private var backgroundKeepAliveEnabled = false
+    @AppStorage("mobileBackgroundKeepAliveMaxMinutes")
+    private var backgroundKeepAliveMaxMinutes =
+        MobileBackgroundKeepAliveSettings.defaultMaxMinutes
     @State private var terminalScrollbackDraft = ""
 
     private let terminalScrollbackPresets = [
@@ -2510,7 +2622,15 @@ private struct IOSSettingsView: View {
                 }
                 Section("后台") {
                     Toggle("后台连接保活", isOn: $backgroundKeepAliveEnabled)
-                    Text("默认关闭。开启后，有活动连接时会使用低精度后台定位维持 SSH、Mosh 和 Tailscale 连接；首次开启需要允许始终访问位置。")
+                    if backgroundKeepAliveEnabled {
+                        Stepper(
+                            "最长后台保活：\(backgroundKeepAliveMaxMinutes) 分钟",
+                            value: $backgroundKeepAliveMaxMinutes,
+                            in: MobileBackgroundKeepAliveSettings.allowedMaxMinutes,
+                            step: 5
+                        )
+                    }
+                    Text("默认关闭。开启后，有活动连接时会使用低精度后台定位维持 SSH、Mosh 和 Tailscale 连接；超过最长时间会主动断开，回到前台也不会自动重连。首次开启需要允许始终访问位置。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

@@ -56,6 +56,63 @@ public enum SHCLIError: LocalizedError {
     }
 }
 
+public enum SHCLIConnectionOverride: Equatable {
+    case configured
+    case ssh
+    case mosh
+}
+
+public struct SHCLIConnectionRequest: Equatable {
+    public let selector: String
+    public let connectionOverride: SHCLIConnectionOverride
+    public let remoteCommand: [String]
+
+    public init(
+        selector: String,
+        connectionOverride: SHCLIConnectionOverride,
+        remoteCommand: [String] = []
+    ) {
+        self.selector = selector
+        self.connectionOverride = connectionOverride
+        self.remoteCommand = remoteCommand
+    }
+
+    /// Accepts both `c <remote> [command ...]` and the shorthand form.
+    public static func parse(_ arguments: [String]) -> Self? {
+        var values = arguments
+        if values.first == "c" || values.first == "connect" {
+            values.removeFirst()
+        }
+        var connectionOverride = SHCLIConnectionOverride.configured
+        var didSetOverride = false
+
+        while let flag = values.first, flag == "--mosh" || flag == "--ssh" {
+            guard !didSetOverride else { return nil }
+            connectionOverride = flag == "--mosh" ? .mosh : .ssh
+            didSetOverride = true
+            values.removeFirst()
+        }
+        guard let selector = values.first, !selector.hasPrefix("-") else {
+            return nil
+        }
+        values.removeFirst()
+        while let flag = values.first, flag == "--mosh" || flag == "--ssh" {
+            guard !didSetOverride else { return nil }
+            connectionOverride = flag == "--mosh" ? .mosh : .ssh
+            didSetOverride = true
+            values.removeFirst()
+        }
+        if values.first == "--" {
+            values.removeFirst()
+        }
+        return Self(
+            selector: selector,
+            connectionOverride: connectionOverride,
+            remoteCommand: values
+        )
+    }
+}
+
 private final class SHRelayResultBox: @unchecked Sendable {
     private let lock = NSLock()
     private var value: Result<String, Error>?
@@ -523,14 +580,57 @@ public struct SHSCPTransfer: Equatable {
         case download
     }
 
-    public let localPath: String
+    public let localPaths: [String]
     public let remotePath: String
     public let direction: Direction
 
+    public var localPath: String {
+        localPaths.first ?? ""
+    }
+
     public init(localPath: String, remotePath: String, direction: Direction) {
-        self.localPath = localPath
+        self.localPaths = [localPath]
         self.remotePath = remotePath
         self.direction = direction
+    }
+
+    public init(
+        localPaths: [String],
+        remotePath: String,
+        direction: Direction
+    ) {
+        self.localPaths = localPaths
+        self.remotePath = remotePath
+        self.direction = direction
+    }
+
+    public static func containsGlob(_ path: String) -> Bool {
+        path.contains("*") || path.contains("?") || path.contains("[")
+    }
+
+    public static func expandedLocalPaths(
+        for patterns: [String],
+        fileManager: FileManager = .default
+    ) -> [String]? {
+        var paths: [String] = []
+        for pattern in patterns {
+            let expanded = NSString(string: pattern).expandingTildeInPath
+            if fileManager.fileExists(atPath: expanded) {
+                paths.append(expanded)
+                continue
+            }
+            guard containsGlob(expanded) else { return nil }
+            var result = glob_t()
+            defer { globfree(&result) }
+            guard Darwin.glob(expanded, 0, nil, &result) == 0 else {
+                return nil
+            }
+            for index in 0..<Int(result.gl_pathc) {
+                guard let value = result.gl_pathv[index] else { continue }
+                paths.append(String(cString: value))
+            }
+        }
+        return paths.isEmpty ? nil : paths
     }
 
     public static func bothEndpointsExistLocally(
@@ -577,6 +677,13 @@ public struct SHSCPTransfer: Equatable {
     ) -> SHSCPTransfer {
         guard let destination else {
             let directory = currentDirectory ?? fileManager.currentDirectoryPath
+            if containsGlob(source) {
+                return SHSCPTransfer(
+                    localPath: directory,
+                    remotePath: source,
+                    direction: .download
+                )
+            }
             let remoteName = NSString(
                 string: source.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
             ).lastPathComponent
@@ -617,6 +724,9 @@ public struct SHSCPTransfer: Equatable {
         fileManager: FileManager = .default
     ) -> String {
         let expanded = NSString(string: requestedLocalPath).expandingTildeInPath
+        if containsGlob(remotePath) {
+            return expanded
+        }
         var isDirectory: ObjCBool = false
         guard fileManager.fileExists(atPath: expanded, isDirectory: &isDirectory) else {
             return expanded
@@ -678,7 +788,8 @@ public enum SHSSHCommandBuilder {
         profile: SHRemoteProfile,
         jumpProfile: SHRemoteProfile?,
         targetPasswordDescriptor: Int32?,
-        jumpPasswordDescriptor: Int32?
+        jumpPasswordDescriptor: Int32?,
+        remoteCommand: [String] = []
     ) throws -> SHSSHInvocation {
         guard profile.isConnectable else {
             throw SHCLIError.invalidRemote(profile.name)
@@ -689,9 +800,13 @@ public enum SHSSHCommandBuilder {
             jumpProfile: jumpProfile,
             jumpPasswordDescriptor: jumpPasswordDescriptor
         )
-        arguments.append("-tt")
         arguments.append("\(profile.resolvedUsername)@\(profile.resolvedHost)")
-        arguments.append(Self.interactiveLoginCommand)
+        if remoteCommand.isEmpty {
+            arguments.insert("-tt", at: arguments.count - 1)
+            arguments.append(Self.interactiveLoginCommand)
+        } else {
+            arguments += remoteCommand
+        }
 
         guard profile.usesPassword else {
             return SHSSHInvocation(
@@ -785,7 +900,7 @@ public enum SHSSHCommandBuilder {
         let remote = "\(profile.resolvedUsername)@\(profile.resolvedHost):\(transfer.remotePath)"
         switch transfer.direction {
         case .upload:
-            arguments += [transfer.localPath, remote]
+            arguments += transfer.localPaths + [remote]
         case .download:
             arguments += [remote, transfer.localPath]
         }

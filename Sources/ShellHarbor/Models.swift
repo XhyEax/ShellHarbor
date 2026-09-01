@@ -365,6 +365,29 @@ enum FileNameCollisionResolver {
     }
 }
 
+enum LocalDownloadCollisionResolver {
+    static func conflictingNames(
+        for entries: [FileEntry],
+        in directory: URL,
+        reservedDestinations: Set<String> = [],
+        fileManager: FileManager = .default
+    ) -> [String] {
+        entries.compactMap { entry in
+            let destination = directory
+                .appendingPathComponent(
+                    entry.name,
+                    isDirectory: entry.isDirectory
+                )
+                .standardizedFileURL.path
+            let isUnavailable = reservedDestinations.contains(
+                destination.lowercased()
+            ) || fileManager.fileExists(atPath: destination)
+            return isUnavailable ? entry.name : nil
+        }
+        .sorted()
+    }
+}
+
 enum FileNameEditing {
     static func renameCaretOffset(
         for name: String,

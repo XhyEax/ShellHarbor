@@ -280,6 +280,10 @@ private final class MobileTerminalNativeView: TerminalView, UIGestureRecognizerD
 
     @objc private func reportRemoteScroll(_ gesture: UIPanGestureRecognizer) {
         guard gesture.state == .changed else { return }
+        guard !isSelectingTextForCopy else {
+            gesture.setTranslation(.zero, in: self)
+            return
+        }
         let translation = gesture.translation(in: self)
         let stepHeight: CGFloat = 18
         let steps = min(16, Int(abs(translation.y) / stepHeight))
@@ -303,12 +307,25 @@ private final class MobileTerminalNativeView: TerminalView, UIGestureRecognizerD
             otherGestureRecognizer !== remoteScrollGesture
     }
 
-    override func becomeFirstResponder() -> Bool {
-        let isSelectingForCopy = gestureRecognizers?.contains { gesture in
+    override func gestureRecognizerShouldBegin(
+        _ gestureRecognizer: UIGestureRecognizer
+    ) -> Bool {
+        guard gestureRecognizer === remoteScrollGesture else {
+            return super.gestureRecognizerShouldBegin(gestureRecognizer)
+        }
+        return !isSelectingTextForCopy
+    }
+
+    private var isSelectingTextForCopy: Bool {
+        if selectionActive { return true }
+        return gestureRecognizers?.contains { gesture in
             guard gesture is UILongPressGestureRecognizer else { return false }
             return gesture.state == .began || gesture.state == .changed
         } ?? false
-        inputView = isSelectingForCopy ? hiddenKeyboardView : nil
+    }
+
+    override func becomeFirstResponder() -> Bool {
+        inputView = isSelectingTextForCopy ? hiddenKeyboardView : nil
         let becameFirstResponder = super.becomeFirstResponder()
         if becameFirstResponder { reloadInputViews() }
         return becameFirstResponder

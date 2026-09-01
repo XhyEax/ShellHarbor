@@ -458,12 +458,16 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         setNeedsDisplay()
     }
 
+    private func selectionViewportY(_ gestureRecognizer: UIGestureRecognizer) -> CGFloat {
+        gestureRecognizer.location(in: self).y - bounds.minY
+    }
+
     private func autoScrollLongPressSelection(_ gestureRecognizer: UILongPressGestureRecognizer) {
         guard gestureRecognizer.state == .changed else {
             stopSelectionTimer()
             return
         }
-        let visibleY = gestureRecognizer.location(in: self).y - contentOffset.y
+        let visibleY = selectionViewportY(gestureRecognizer)
         let direction: CGFloat
         if visibleY < 0 {
             direction = -1
@@ -520,7 +524,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             let hit = calculateTapHit(gesture: gestureRecognizer).grid
             extendLongPressSelection(to: hit)
 
-            let visibleY = gestureRecognizer.location(in: self).y - contentOffset.y
+            let visibleY = selectionViewportY(gestureRecognizer)
             stopSelectionTimer()
             if visibleY < 0 || visibleY > bounds.height {
                 startSelectionTimer { [weak self, weak gestureRecognizer] in
@@ -837,6 +841,33 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     // The start of the pan operation, for the case where we are not sending the input to the client
     var panStart: Position?
     var panTask: Task<(),Never>?
+
+    private func autoScrollPanSelection(_ gestureRecognizer: UIPanGestureRecognizer) {
+        guard gestureRecognizer.state == .changed, selection.active else {
+            stopSelectionTimer()
+            return
+        }
+        let visibleY = selectionViewportY(gestureRecognizer)
+        let direction: CGFloat
+        if visibleY < 0 {
+            direction = -1
+        } else if visibleY > bounds.height {
+            direction = 1
+        } else {
+            stopSelectionTimer()
+            return
+        }
+
+        let maximumOffset = max(0, contentSize.height - bounds.height)
+        let nextOffset = min(maximumOffset, max(0, contentOffset.y + direction * cellDimension.height))
+        guard nextOffset != contentOffset.y else {
+            stopSelectionTimer()
+            return
+        }
+        contentOffset.y = nextOffset
+        selection.pivotExtend(bufferPosition: calculateTapHit(gesture: gestureRecognizer).grid)
+        setNeedsDisplay()
+    }
     
     @objc func panSelectionHandler (_ gestureRecognizer: UIPanGestureRecognizer) {
         func near (_ pos1: Position, _ pos2: Position) -> Bool {
@@ -847,6 +878,10 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         case .began:
             let hit = calculateTapHit(gesture: gestureRecognizer).grid
             if selection.active {
+                // Selection-handle drags belong exclusively to text
+                // selection. Keep the scroll view stationary while the
+                // finger remains inside the visible terminal page.
+                isScrollEnabled = false
                 var extend = false
                 if near (selection.start, hit) {
                     selection.pivot = selection.end
@@ -863,16 +898,17 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             }
             panStart = hit
         case .changed:
-            let absoluteY = gestureRecognizer.location (in: self).y - contentOffset.y
+            let visibleY = selectionViewportY(gestureRecognizer)
             let hit = calculateTapHit(gesture: gestureRecognizer).grid
             if selection.active {
+                isScrollEnabled = false
                 stopSelectionTimer()
                 selection.pivotExtend(bufferPosition: hit)
                 gestureRecognizer.setTranslation(CGPoint.zero, in: self)
-                if absoluteY < 0 || absoluteY > bounds.height {
-                    startSelectionTimer {
-                        let newPlace = CGRect (x: 0, y: max (0, self.contentOffset.y+absoluteY), width: self.bounds.width, height: self.bounds.height)
-                        self.scrollRectToVisible(newPlace, animated: true)
+                if visibleY < 0 || visibleY > bounds.height {
+                    startSelectionTimer { [weak self, weak gestureRecognizer] in
+                        guard let self, let gestureRecognizer else { return }
+                        self.autoScrollPanSelection(gestureRecognizer)
                     }
                 }
                 setNeedsDisplay()
@@ -891,12 +927,14 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             }
         case .ended:
             stopSelectionTimer()
+            isScrollEnabled = true
             if selection.active {
                 showContextMenu (forRegion: makeContextMenuRegionForSelection(), pos: calculateTapHit(gesture: gestureRecognizer).grid)
             }
             break
-        case .cancelled:
+        case .cancelled, .failed:
             stopSelectionTimer()
+            isScrollEnabled = true
             selection.active = false
         default:
             break

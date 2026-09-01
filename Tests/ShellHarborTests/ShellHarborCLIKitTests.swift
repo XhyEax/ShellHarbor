@@ -182,6 +182,64 @@ final class ShellHarborCLIKitTests: XCTestCase {
         XCTAssertEqual(remote.resolvedGroup, "未分组")
     }
 
+    func testConnectionCommandMayOmitCSubcommand() {
+        XCTAssertEqual(
+            SHCLIConnectionRequest.parse(["2222"]),
+            SHCLIConnectionRequest.parse(["c", "2222"])
+        )
+        XCTAssertEqual(
+            SHCLIConnectionRequest.parse(["studio", "--mosh"]),
+            SHCLIConnectionRequest(
+                selector: "studio",
+                connectionOverride: .mosh
+            )
+        )
+        XCTAssertEqual(
+            SHCLIConnectionRequest.parse(["connect", "mini", "--ssh"]),
+            SHCLIConnectionRequest(
+                selector: "mini",
+                connectionOverride: .ssh
+            )
+        )
+        XCTAssertEqual(
+            SHCLIConnectionRequest.parse(["c", "2222", "printf", "%s", "a b"]),
+            SHCLIConnectionRequest(
+                selector: "2222",
+                connectionOverride: .configured,
+                remoteCommand: ["printf", "%s", "a b"]
+            )
+        )
+        XCTAssertEqual(
+            SHCLIConnectionRequest.parse(["2222", "--", "--version"]),
+            SHCLIConnectionRequest(
+                selector: "2222",
+                connectionOverride: .configured,
+                remoteCommand: ["--version"]
+            )
+        )
+        XCTAssertNil(SHCLIConnectionRequest.parse(["--unknown", "mini"]))
+    }
+
+    func testCLICommandUsesNonInteractiveSSHAndPreservesArguments() throws {
+        let remote = try profile(name: "Command", host: "example.com")
+        let invocation = try SHSSHCommandBuilder.build(
+            profile: remote,
+            jumpProfile: nil,
+            targetPasswordDescriptor: nil,
+            jumpPasswordDescriptor: nil,
+            remoteCommand: ["printf", "%s\\n", "a b"]
+        )
+
+        XCTAssertFalse(invocation.arguments.contains("-tt"))
+        XCTAssertFalse(invocation.arguments.contains(where: {
+            $0.contains("$HOME/.bashrc")
+        }))
+        XCTAssertEqual(
+            Array(invocation.arguments.suffix(4)),
+            ["deploy@example.com", "printf", "%s\\n", "a b"]
+        )
+    }
+
     func testSCPDetectsExistingSourceAsLocalUpload() throws {
         let source = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
@@ -292,6 +350,73 @@ final class ShellHarborCLIKitTests: XCTestCase {
         XCTAssertEqual(
             transfer.localPath,
             directory.appendingPathComponent("xx (2).txt").path
+        )
+    }
+
+    func testSCPRemoteWildcardDownloadsIntoDirectory() throws {
+        let fileManager = FileManager.default
+        let directory = fileManager.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        try fileManager.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        defer { try? fileManager.removeItem(at: directory) }
+
+        let omittedDestination = SHSCPTransfer.detect(
+            from: "/remote/reports/*.txt",
+            to: nil,
+            fileManager: fileManager,
+            currentDirectory: directory.path
+        )
+        let explicitDestination = SHSCPTransfer.detect(
+            from: "/remote/reports/report-?.txt",
+            to: directory.path,
+            fileManager: fileManager
+        )
+
+        XCTAssertEqual(omittedDestination.localPath, directory.path)
+        XCTAssertEqual(explicitDestination.localPath, directory.path)
+        XCTAssertEqual(omittedDestination.direction, .download)
+    }
+
+    func testSCPLocalWildcardExpandsToMultipleUploadSources() throws {
+        let fileManager = FileManager.default
+        let directory = fileManager.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        try fileManager.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        defer { try? fileManager.removeItem(at: directory) }
+        let first = directory.appendingPathComponent("first.txt")
+        let second = directory.appendingPathComponent("second.txt")
+        try Data().write(to: first)
+        try Data().write(to: second)
+
+        let paths = try XCTUnwrap(
+            SHSCPTransfer.expandedLocalPaths(
+                for: [directory.appendingPathComponent("*.txt").path],
+                fileManager: fileManager
+            )
+        )
+        let remote = try profile(name: "Files", host: "example.com")
+        let invocation = try SHSSHCommandBuilder.buildSCP(
+            profile: remote,
+            jumpProfile: nil,
+            transfer: SHSCPTransfer(
+                localPaths: paths,
+                remotePath: "~/incoming/",
+                direction: .upload
+            ),
+            targetPasswordDescriptor: nil,
+            jumpPasswordDescriptor: nil
+        )
+
+        XCTAssertEqual(Set(paths), Set([first.path, second.path]))
+        XCTAssertEqual(
+            Array(invocation.arguments.suffix(3)),
+            [first.path, second.path, "deploy@example.com:~/incoming/"]
         )
     }
 

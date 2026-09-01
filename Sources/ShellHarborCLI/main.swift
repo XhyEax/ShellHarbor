@@ -5,13 +5,15 @@ private let usage = """
 用法：
   shcli ls [--json]
   shcli local
-  shcli c <Remote 名称、序号或 UUID> [--mosh|--ssh]
-  shcli scp <Remote 名称、序号或 UUID> <from> [to]
+  shcli c <Remote 名称、序号或 UUID> [--mosh|--ssh] [command [args...]]
+  shcli <Remote 名称、序号或 UUID> [--mosh|--ssh] [command [args...]]
+  shcli scp <Remote 名称、序号或 UUID> <from...> [to]
   shcli help
 
 说明：
-  c 默认使用 Remote 保存的 SSH/Mosh 方式；--mosh 或 --ssh 可临时覆盖。
-  scp 自动检测 from：本地存在时上传，否则从 Remote 下载；支持文件和目录。
+  c 可省略；连接默认使用 Remote 保存的 SSH/Mosh 方式，--mosh 或 --ssh 可临时覆盖。
+  带 command 时按 SSH 方式执行远程命令；可用 -- 分隔以 - 开头的命令。
+  scp 自动检测 from：本地存在时上传，否则从 Remote 下载；支持文件、目录和通配符。
   省略 to 时，from 固定视为 Remote 路径，并下载到当前目录。
   密码读取自 ShellHarbor 本地 RSA 加密配置，并通过匿名管道传递。
 """
@@ -24,12 +26,6 @@ private struct ListedRemote: Encodable {
     let endpoint: String
     let authentication: String
     let jumpRemoteID: UUID?
-}
-
-private enum ConnectionOverride {
-    case configured
-    case ssh
-    case mosh
 }
 
 @main
@@ -70,29 +66,36 @@ private enum ShellHarborCLI {
             }
             try launchLocalShell()
         case "c", "connect":
-            let values = Array(arguments.dropFirst())
-            let flags = values.filter { $0 == "--mosh" || $0 == "--ssh" }
-            let selectors = values.filter { $0 != "--mosh" && $0 != "--ssh" }
-            guard selectors.count == 1, flags.count <= 1 else {
+            guard let request = SHCLIConnectionRequest.parse(arguments) else {
                 print(usage)
                 exit(2)
             }
-            let override: ConnectionOverride = flags.first == "--mosh"
-                ? .mosh
-                : (flags.first == "--ssh" ? .ssh : .configured)
-            try connect(selector: selectors[0], override: override)
+            try connect(
+                selector: request.selector,
+                override: request.connectionOverride,
+                remoteCommand: request.remoteCommand
+            )
         case "scp":
-            guard arguments.count == 3 || arguments.count == 4 else {
+            guard arguments.count >= 3 else {
                 print(usage)
                 exit(2)
             }
+            let operands = Array(arguments.dropFirst(2))
             try copy(
                 selector: arguments[1],
-                from: arguments[2],
-                to: arguments.count == 4 ? arguments[3] : nil
+                from: operands.count == 1 ? operands : Array(operands.dropLast()),
+                to: operands.count == 1 ? nil : operands.last
             )
         default:
-            throw SHCLIError.remoteNotFound(command)
+            guard let request = SHCLIConnectionRequest.parse(arguments) else {
+                print(usage)
+                exit(2)
+            }
+            try connect(
+                selector: request.selector,
+                override: request.connectionOverride,
+                remoteCommand: request.remoteCommand
+            )
         }
     }
 
@@ -156,7 +159,8 @@ private enum ShellHarborCLI {
 
     private static func connect(
         selector: String,
-        override: ConnectionOverride
+        override: SHCLIConnectionOverride,
+        remoteCommand: [String]
     ) throws {
         let profiles = try SHRemoteStore.load()
         var target = try SHRemoteStore.resolve(selector, in: profiles)
@@ -188,8 +192,10 @@ private enum ShellHarborCLI {
         if let jumpTailscale {
             jump?.proxyPort = jumpTailscale.port
         }
-        let useMosh = override == .mosh || (
-            override == .configured && target.prefersMosh
+        let useMosh = remoteCommand.isEmpty && (
+            override == .mosh || (
+                override == .configured && target.prefersMosh
+            )
         )
         let relayProcess = jumpTailscale ?? targetTailscale
         let tailscaleClientPath = try useMosh
@@ -207,7 +213,8 @@ private enum ShellHarborCLI {
                 profile: target,
                 jumpProfile: jump,
                 targetPasswordDescriptor: targetPipe?.readDescriptor,
-                jumpPasswordDescriptor: jumpPipe?.readDescriptor
+                jumpPasswordDescriptor: jumpPipe?.readDescriptor,
+                remoteCommand: remoteCommand
             )
 
         try withExtendedLifetime((
@@ -222,12 +229,12 @@ private enum ShellHarborCLI {
 
     private static func copy(
         selector: String,
-        from source: String,
+        from sources: [String],
         to destination: String?
     ) throws {
         // Resolve an ambiguous local/local pair before decrypting credentials
         // or starting a saved network proxy.
-        let transfer = try resolveSCPTransfer(from: source, to: destination)
+        let transfer = try resolveSCPTransfer(from: sources, to: destination)
         let profiles = try SHRemoteStore.load()
         var target = try SHRemoteStore.decrypted(
             SHRemoteStore.resolve(selector, in: profiles)
@@ -266,9 +273,10 @@ private enum ShellHarborCLI {
         let transferLog: String
         switch transfer.direction {
         case .upload:
+            let localSources = transfer.localPaths.joined(separator: "\n        ")
             transferLog = """
             [SCP] Local → Remote
-              from: \(transfer.localPath)
+              from: \(localSources)
               to:   \(remoteEndpoint)
             [SCP] 开始传输，进度如下：
 
@@ -294,14 +302,38 @@ private enum ShellHarborCLI {
     }
 
     private static func resolveSCPTransfer(
-        from source: String,
+        from sources: [String],
         to destination: String?
     ) throws -> SHSCPTransfer {
-        guard let destination,
-              SHSCPTransfer.bothEndpointsExistLocally(
-                  from: source,
-                  to: destination
-              ) else {
+        guard let source = sources.first else {
+            throw SHCLIError.invalidConfiguration
+        }
+        if destination == nil {
+            guard sources.count == 1 else {
+                throw SHCLIError.invalidConfiguration
+            }
+            return SHSCPTransfer.detect(from: source, to: nil)
+        }
+        guard let destination else {
+            throw SHCLIError.invalidConfiguration
+        }
+        let localPaths = SHSCPTransfer.expandedLocalPaths(for: sources)
+        let expandedDestination = NSString(string: destination).expandingTildeInPath
+        let isAmbiguous = sources.count == 1
+            && localPaths != nil
+            && FileManager.default.fileExists(atPath: expandedDestination)
+
+        guard isAmbiguous else {
+            if let localPaths {
+                return SHSCPTransfer(
+                    localPaths: localPaths,
+                    remotePath: destination,
+                    direction: .upload
+                )
+            }
+            guard sources.count == 1 else {
+                throw SHCLIError.invalidConfiguration
+            }
             return SHSCPTransfer.detect(from: source, to: destination)
         }
 
@@ -319,9 +351,9 @@ private enum ShellHarborCLI {
         while let answer = readLine()?.trimmingCharacters(in: .whitespacesAndNewlines) {
             switch answer {
             case "1":
-                return SHSCPTransfer.make(
-                    from: source,
-                    to: destination,
+                return SHSCPTransfer(
+                    localPaths: localPaths ?? [],
+                    remotePath: destination,
                     direction: .upload
                 )
             case "2":

@@ -11,6 +11,11 @@ enum UploadCollisionResolution {
     case rename
 }
 
+enum DownloadCollisionResolution {
+    case overwrite
+    case rename
+}
+
 struct UploadCollisionRequest: Identifiable {
     let id = UUID()
     let entries: [FileEntry]
@@ -21,6 +26,15 @@ struct UploadCollisionRequest: Identifiable {
     var conflictingNames: [String] {
         entries.map(\.name).filter(existingNames.contains).sorted()
     }
+}
+
+struct DownloadCollisionRequest: Identifiable {
+    let id = UUID()
+    let entries: [FileEntry]
+    let localDirectory: URL
+    let conflictingNames: [String]
+    let openWhenFinished: Bool
+    let workspace: SessionWorkspace
 }
 
 @MainActor
@@ -36,6 +50,7 @@ final class AppState: ObservableObject {
     @Published var showingLocalSettings = false
     @Published var notice: String?
     @Published var uploadCollisionRequest: UploadCollisionRequest?
+    @Published var downloadCollisionRequest: DownloadCollisionRequest?
     @Published private(set) var globalLocalPathHistory: [String] =
         UserDefaults.standard.stringArray(forKey: "globalLocalPathHistory") ?? []
     @Published var shcliLinkEnabled = SHCLILinkPreferences.savedEnabled {
@@ -1559,8 +1574,8 @@ final class AppState: ObservableObject {
                 )
             }
         } else {
-            enqueueDownload(
-                entry,
+            download(
+                [entry],
                 openWhenFinished:
                     RemoteFilePreviewPolicy.shouldOpenAfterDownload(entry),
                 in: workspace
@@ -1852,37 +1867,77 @@ final class AppState: ObservableObject {
 
     func download(
         _ entries: [FileEntry],
+        openWhenFinished: Bool = false,
+        in workspace: SessionWorkspace
+    ) {
+        guard !entries.isEmpty else { return }
+        let localDirectory = workspace.localPath
+        let conflictingNames = LocalDownloadCollisionResolver.conflictingNames(
+            for: entries,
+            in: localDirectory,
+            reservedDestinations: reservedDownloadDestinations(in: workspace)
+        )
+        if !conflictingNames.isEmpty {
+            downloadCollisionRequest = DownloadCollisionRequest(
+                entries: entries,
+                localDirectory: localDirectory,
+                conflictingNames: conflictingNames,
+                openWhenFinished: openWhenFinished,
+                workspace: workspace
+            )
+            return
+        }
+        enqueueDownloads(
+            entries,
+            localDirectory: localDirectory,
+            resolution: .rename,
+            openWhenFinished: openWhenFinished,
+            in: workspace
+        )
+    }
+
+    private func enqueueDownloads(
+        _ entries: [FileEntry],
+        localDirectory: URL,
+        resolution: DownloadCollisionResolution,
+        openWhenFinished: Bool,
         in workspace: SessionWorkspace
     ) {
         for entry in entries {
-            enqueueDownload(entry, in: workspace)
+            enqueueDownload(
+                entry,
+                localDirectory: localDirectory,
+                resolution: resolution,
+                openWhenFinished: openWhenFinished,
+                in: workspace
+            )
         }
     }
 
     private func enqueueDownload(
         _ entry: FileEntry,
+        localDirectory: URL,
+        resolution: DownloadCollisionResolution,
         openWhenFinished: Bool = false,
         in workspace: SessionWorkspace
     ) {
-        let queuedPaths = Set(
-            workspace.transfers.lazy
-                .filter {
-                    $0.direction == .download &&
-                        $0.status.reservesDestination
-                }
-                .map { $0.destination.lowercased() }
-        )
-        let resolvedName = FileNameCollisionResolver.uniqueName(
-            for: entry.name,
-            isDirectory: entry.isDirectory
-        ) { candidate in
-            let path = workspace.localPath
-                .appendingPathComponent(candidate)
-                .path
-            return queuedPaths.contains(path.lowercased()) ||
-                FileManager.default.fileExists(atPath: path)
+        let resolvedName: String
+        if resolution == .overwrite {
+            resolvedName = entry.name
+        } else {
+            resolvedName = FileNameCollisionResolver.uniqueName(
+                for: entry.name,
+                isDirectory: entry.isDirectory
+            ) { candidate in
+                let path = localDirectory
+                    .appendingPathComponent(candidate)
+                    .standardizedFileURL.path
+                return reservedDownloadDestinations(in: workspace).contains(
+                    path.lowercased()
+                ) || FileManager.default.fileExists(atPath: path)
+            }
         }
-        let destination = workspace.localPath
+        let destination = localDirectory
             .appendingPathComponent(
                 resolvedName,
                 isDirectory: entry.isDirectory
@@ -1898,6 +1953,40 @@ final class AppState: ObservableObject {
             totalBytes: entry.isDirectory ? nil : entry.size,
             openWhenFinished: openWhenFinished
         )
+    }
+
+    private func reservedDownloadDestinations(
+        in workspace: SessionWorkspace
+    ) -> Set<String> {
+        Set(
+            workspace.transfers.lazy
+                .filter {
+                    $0.direction == .download &&
+                        $0.status.reservesDestination
+                }
+                .map {
+                    URL(fileURLWithPath: $0.destination)
+                        .standardizedFileURL.path.lowercased()
+                }
+        )
+    }
+
+    func resolveDownloadCollision(
+        _ resolution: DownloadCollisionResolution
+    ) {
+        guard let request = downloadCollisionRequest else { return }
+        downloadCollisionRequest = nil
+        enqueueDownloads(
+            request.entries,
+            localDirectory: request.localDirectory,
+            resolution: resolution,
+            openWhenFinished: request.openWhenFinished,
+            in: request.workspace
+        )
+    }
+
+    func cancelDownloadCollision() {
+        downloadCollisionRequest = nil
     }
 
     private func enqueueTransfer(

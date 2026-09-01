@@ -77,6 +77,31 @@ struct MainView: View {
                 )
             }
         }
+        .confirmationDialog(
+            "本地已有同名项目",
+            isPresented: Binding(
+                get: { state.downloadCollisionRequest != nil },
+                set: { if !$0 { state.cancelDownloadCollision() } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("覆盖", role: .destructive) {
+                state.resolveDownloadCollision(.overwrite)
+            }
+            Button("重命名为（1）") {
+                state.resolveDownloadCollision(.rename)
+            }
+            Button("取消", role: .cancel) {
+                state.cancelDownloadCollision()
+            }
+        } message: {
+            if let request = state.downloadCollisionRequest {
+                Text(
+                    request.conflictingNames.prefix(5).joined(separator: "、")
+                        + (request.conflictingNames.count > 5 ? " 等" : "")
+                )
+            }
+        }
         .overlay {
             if let notice = state.notice {
                 NoticeOverlay(message: notice) {
