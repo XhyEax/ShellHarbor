@@ -444,6 +444,9 @@ enum SSHCommandBuilder {
         direction: TransferDirection,
         recursive: Bool
     ) throws -> SSHInvocation {
+        // Modern OpenSSH scp uses SFTP by default. Do not opt into legacy SCP
+        // mode (`-O`): keeping each path as one argv element preserves spaces,
+        // parentheses and other shell metacharacters as literal path content.
         var arguments = ["-P", String(profile.port)]
         arguments += hostKeyArguments(for: profile)
         arguments += authenticationArguments(for: profile)

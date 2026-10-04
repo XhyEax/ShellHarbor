@@ -65,6 +65,9 @@ public protocol LocalProcessTerminalViewDelegate: AnyObject {
  * subclass this and override the methods
  */
 open class LocalProcessTerminalView: TerminalView, TerminalViewDelegate, LocalProcessDelegate {
+    /// Controls whether a local grid resize is propagated to the child PTY.
+    /// The terminal view still lays itself out while propagation is disabled.
+    public var propagatesSizeChangesToProcess = true
     
     public internal(set) var process: LocalProcess!
 
@@ -95,7 +98,7 @@ open class LocalProcessTerminalView: TerminalView, TerminalViewDelegate, LocalPr
      * This method is invoked to notify the client of the new columsn and rows that have been set by the UI
      */
     public func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
-        guard process.running else {
+        guard propagatesSizeChangesToProcess, process.running else {
             return
         }
         var size = getWindowSize()

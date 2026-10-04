@@ -1609,14 +1609,15 @@ final class SSHCommandBuilderTests: XCTestCase {
         let invocation = try SSHCommandBuilder.scp(
             profile: profile,
             localPath: "/tmp/report.txt",
-            remotePath: "~/reports/a;$(touch bad).txt",
+            remotePath: "~/reports/build (1);$(touch bad).txt",
             direction: .upload,
             recursive: false
         )
 
+        XCTAssertFalse(invocation.arguments.contains("-O"))
         XCTAssertEqual(
             invocation.arguments.last,
-            "alice@example.com:~/reports/a;$(touch bad).txt"
+            "alice@example.com:~/reports/build (1);$(touch bad).txt"
         )
     }
 
@@ -2078,9 +2079,13 @@ final class SSHCommandBuilderTests: XCTestCase {
         }
 
         findPasteboard.clearContents()
-        findPasteboard.setString("system", forType: .string)
-        terminal.showFindInterface()
+        findPasteboard.setString("unchanged-find-value", forType: .string)
+        terminal.showFindInterface(searchTerm: "system")
         XCTAssertEqual(terminal.searchMatchSummary("system").index, 1)
+        XCTAssertEqual(
+            findPasteboard.string(forType: .string),
+            "unchanged-find-value"
+        )
 
         terminal.scroll(toPosition: 0.38)
         var summary = terminal.searchMatchSummary("system")
@@ -2095,16 +2100,6 @@ final class SSHCommandBuilderTests: XCTestCase {
 
     @MainActor
     func testFindBarWheelUsesLocalScrollbackWhenTmuxMouseModeIsOn() throws {
-        let findPasteboard = NSPasteboard(name: .find)
-        let previousFindText = findPasteboard.string(forType: .string)
-        defer {
-            findPasteboard.clearContents()
-            if let previousFindText {
-                findPasteboard.setString(previousFindText, forType: .string)
-            }
-        }
-        findPasteboard.clearContents()
-
         let terminal = SteadyCursorTerminalView(frame: .init(
             x: 0,
             y: 0,

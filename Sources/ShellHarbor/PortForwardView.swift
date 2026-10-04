@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 struct PortForwardView: View {
     @EnvironmentObject private var state: AppState
@@ -26,6 +27,19 @@ struct PortForwardView: View {
                         .textSelection(.enabled)
                 }
                 Spacer()
+                Button("全部启用") {
+                    for rule in workspace.portForwardRules where rule.isValid {
+                        let status = controller.statuses[rule.id] ?? .stopped
+                        guard status != .starting, status != .running else {
+                            continue
+                        }
+                        state.startPortForward(rule, in: workspace)
+                    }
+                }
+                .disabled(workspace.portForwardRules.isEmpty)
+                Button("全部停止", role: .destructive) {
+                    controller.stopAll()
+                }
                 Button {
                     workspace.portForwardRules.append(PortForwardRule())
                 } label: {
@@ -122,6 +136,13 @@ struct PortForwardView: View {
                 }
                 Spacer()
                 if isActive {
+                    if value.direction == .local {
+                        Button {
+                            openInBrowser(value)
+                        } label: {
+                            Label("浏览器", systemImage: "safari")
+                        }
+                    }
                     Button("停止", role: .destructive) {
                         controller.stop(value.id)
                     }
@@ -148,6 +169,16 @@ struct PortForwardView: View {
             RoundedRectangle(cornerRadius: 10)
                 .stroke(.separator.opacity(0.45))
         }
+    }
+
+    private func openInBrowser(_ rule: PortForwardRule) {
+        let host = rule.bindHost.isEmpty || rule.bindHost == "0.0.0.0"
+            ? "127.0.0.1"
+            : rule.bindHost
+        guard let url = URL(string: "http://\(host):\(rule.listenPort)/") else {
+            return
+        }
+        NSWorkspace.shared.open(url)
     }
 
     private func statusColor(_ status: PortForwardController.Status) -> Color {

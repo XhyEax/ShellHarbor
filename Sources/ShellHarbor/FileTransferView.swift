@@ -713,9 +713,16 @@ private struct RemoteFilePane: View {
                     entries: workspace.remoteEntries
                 )
             },
-            recentPaths: TransferRecentDirectoryResolver.remoteDirectories(
-                from: workspace.transfers
-            ),
+            recentPaths: {
+                var seen = Set<String>()
+                return (
+                    state.recentRemoteTransferDirectories(
+                        for: workspace.remoteID
+                    ) + TransferRecentDirectoryResolver.remoteDirectories(
+                        from: workspace.transfers
+                    )
+                ).filter { seen.insert($0).inserted }
+            }(),
             onRecentPathSelect: {
                 state.navigateRemote(to: $0, in: workspace)
             },

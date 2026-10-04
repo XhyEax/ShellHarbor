@@ -64,6 +64,7 @@ struct InteractiveTerminalRepresentable: NSViewRepresentable {
     let fontFamily: TerminalFontFamily
     let fontSize: Double
     let isActive: Bool
+    let onFilePathClicked: (String) -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(controller: controller, connectionToken: connectionToken)
@@ -97,6 +98,8 @@ struct InteractiveTerminalRepresentable: NSViewRepresentable {
         (view as? SteadyCursorTerminalView)?.restorationController =
             controller
         (view as? SteadyCursorTerminalView)?.configureScrollerAutoHide()
+        (view as? SteadyCursorTerminalView)?.configureResizeAuthority()
+        view.filePathClickHandler = onFilePathClicked
         // Match the system wcwidth behavior used by tmux/screen. SwiftTerm's
         // wide default can move its cursor two cells while the remote PTY
         // moves one, which makes text appear out of order after Mosh redraws.
@@ -119,6 +122,7 @@ struct InteractiveTerminalRepresentable: NSViewRepresentable {
 
     func updateNSView(_ view: LocalProcessTerminalView, context: Context) {
         controller.retainTerminalView(view)
+        view.filePathClickHandler = onFilePathClicked
         context.coordinator.synchronize(
             view: view,
             connectionToken: connectionToken,
@@ -175,10 +179,19 @@ struct InteractiveTerminalRepresentable: NSViewRepresentable {
             fontSize: Double,
             isActive: Bool
         ) {
+            (view as? SteadyCursorTerminalView)?
+                .workspaceAllowsRemoteResize = isActive
             if self.isActive != isActive {
                 self.isActive = isActive
                 if isActive {
                     focusIfActive(view)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                        [weak view] in
+                        guard let view, NSApp.isActive,
+                              view.window?.isKeyWindow == true else { return }
+                        view.propagatesSizeChangesToProcess = true
+                        view.reapplyCurrentWindowSize()
+                    }
                 } else if view.window?.firstResponder === view {
                     view.window?.makeFirstResponder(nil)
                 }
@@ -287,7 +300,9 @@ struct InteractiveTerminalRepresentable: NSViewRepresentable {
             // become the foreground process.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
                 [weak view] in
-                view?.reapplyCurrentWindowSize()
+                guard isActive, NSApp.isActive,
+                      let view, view.window?.isKeyWindow == true else { return }
+                view.reapplyCurrentWindowSize()
             }
             focusIfActive(view)
         }
@@ -347,6 +362,84 @@ final class SteadyCursorTerminalView: LocalProcessTerminalView {
     private var remoteUsesAlternateScreen = false
     private var interactionSequenceTail = ""
     private var scrollerHideWorkItem: DispatchWorkItem?
+    private nonisolated(unsafe) var resizeAuthorityObservers: [NSObjectProtocol] = []
+    private var sessionAllowsRemoteResize = true
+    var workspaceAllowsRemoteResize = false {
+        didSet { updateResizeAuthority() }
+    }
+
+    deinit {
+        for observer in resizeAuthorityObservers {
+            NotificationCenter.default.removeObserver(observer)
+            NSWorkspace.shared.notificationCenter.removeObserver(observer)
+        }
+    }
+
+    func configureResizeAuthority() {
+        guard resizeAuthorityObservers.isEmpty else {
+            updateResizeAuthority()
+            return
+        }
+        let center = NotificationCenter.default
+        for name in [
+            NSApplication.didBecomeActiveNotification,
+            NSApplication.didResignActiveNotification,
+            NSWindow.didBecomeKeyNotification,
+            NSWindow.didResignKeyNotification
+        ] {
+            resizeAuthorityObservers.append(
+                center.addObserver(forName: name, object: nil, queue: .main) {
+                    [weak self] _ in
+                    Task { @MainActor [weak self] in
+                        self?.updateResizeAuthority()
+                    }
+                }
+            )
+        }
+        let workspaceCenter = NSWorkspace.shared.notificationCenter
+        for name in [
+            NSWorkspace.sessionDidBecomeActiveNotification,
+            NSWorkspace.didWakeNotification
+        ] {
+            resizeAuthorityObservers.append(
+                workspaceCenter.addObserver(
+                    forName: name,
+                    object: nil,
+                    queue: .main
+                ) { [weak self] _ in
+                    Task { @MainActor [weak self] in
+                        self?.sessionAllowsRemoteResize = true
+                        self?.updateResizeAuthority()
+                    }
+                }
+            )
+        }
+        for name in [
+            NSWorkspace.sessionDidResignActiveNotification,
+            NSWorkspace.screensDidSleepNotification,
+            NSWorkspace.willSleepNotification
+        ] {
+            resizeAuthorityObservers.append(
+                workspaceCenter.addObserver(
+                    forName: name,
+                    object: nil,
+                    queue: .main
+                ) { [weak self] _ in
+                    Task { @MainActor [weak self] in
+                        self?.sessionAllowsRemoteResize = false
+                        self?.updateResizeAuthority()
+                    }
+                }
+            )
+        }
+        updateResizeAuthority()
+    }
+
+    private func updateResizeAuthority() {
+        propagatesSizeChangesToProcess = workspaceAllowsRemoteResize &&
+            sessionAllowsRemoteResize && NSApp.isActive &&
+            window?.isKeyWindow == true
+    }
 
     func configureScrollerAutoHide() {
         DispatchQueue.main.async { [weak self] in

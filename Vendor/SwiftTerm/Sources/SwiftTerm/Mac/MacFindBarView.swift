@@ -21,6 +21,7 @@ final class TerminalFindBarView: NSVisualEffectView, NSSearchFieldDelegate {
     private let caseSensitiveButton = NSButton(checkboxWithTitle: "Aa", target: nil, action: nil)
     private let regexButton = NSButton(checkboxWithTitle: ".*", target: nil, action: nil)
     private let wholeWordButton = NSButton(checkboxWithTitle: "Word", target: nil, action: nil)
+    private var searchWorkItem: DispatchWorkItem?
 
     var searchText: String {
         get { searchField.stringValue }
@@ -166,7 +167,13 @@ final class TerminalFindBarView: NSVisualEffectView, NSSearchFieldDelegate {
     }
 
     func controlTextDidChange(_ obj: Notification) {
-        onSearchChanged?(searchField.stringValue)
+        searchWorkItem?.cancel()
+        let term = searchField.stringValue
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.onSearchChanged?(term)
+        }
+        searchWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: workItem)
     }
 
     func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {

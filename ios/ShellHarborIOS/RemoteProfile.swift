@@ -291,6 +291,7 @@ final class RemoteStore {
     private let restorationURL: URL
     private var didRestoreSessions = false
     private var restorationSaveTask: Task<Void, Never>?
+    let portForwardStore = MobilePortForwardStore()
 
     init() {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first

@@ -39,7 +39,7 @@ struct DownloadCollisionRequest: Identifiable {
 
 @MainActor
 final class AppState: ObservableObject {
-    private var commandKeyMonitor: Any?
+    private nonisolated(unsafe) var commandKeyMonitor: Any?
     /// Persisted Remote definitions. The historical property name is kept to
     /// avoid a migration of the on-disk JSON format.
     @Published var sessions: [SessionProfile]
@@ -53,6 +53,14 @@ final class AppState: ObservableObject {
     @Published var downloadCollisionRequest: DownloadCollisionRequest?
     @Published private(set) var globalLocalPathHistory: [String] =
         UserDefaults.standard.stringArray(forKey: "globalLocalPathHistory") ?? []
+    @Published private(set) var transferLocalDirectoryHistory: [String] =
+        UserDefaults.standard.stringArray(
+            forKey: "transferLocalDirectoryHistory"
+        ) ?? []
+    private var transferRemoteDirectoryHistory: [String: [String]] =
+        UserDefaults.standard.dictionary(
+            forKey: "transferRemoteDirectoryHistory"
+        ) as? [String: [String]] ?? [:]
     @Published var shcliLinkEnabled = SHCLILinkPreferences.savedEnabled {
         didSet {
             SHCLILinkPreferences.save(enabled: shcliLinkEnabled)
@@ -139,7 +147,10 @@ final class AppState: ObservableObject {
     private var workspaces: [UUID: SessionWorkspace] = [:]
     private var lastWorkspaceByRemote: [UUID: UUID] = [:]
     private var inspectionTasks: [UUID: Task<Void, Never>] = [:]
+    private var connectionTasks: [UUID: Task<Void, Never>] = [:]
+    private var connectionTaskTokens: [UUID: UUID] = [:]
     private var transferControls: [UUID: CommandProcessControl] = [:]
+    private var transferTasks: [UUID: Task<Void, Never>] = [:]
     private var restorationSaveTask: Task<Void, Never>?
     private let tailscaleProxyManager = TailscaleProxyManager()
     private let fallbackTerminal = TerminalController()
@@ -165,9 +176,16 @@ final class AppState: ObservableObject {
         let transferDirectories = TransferRecentDirectoryResolver.localDirectories(
             from: activeWorkspaces.flatMap(\.transfers)
         )
-        return (globalLocalPathHistory + transferDirectories).filter {
+        return (
+            globalLocalPathHistory + transferLocalDirectoryHistory +
+                transferDirectories
+        ).filter {
             seen.insert($0).inserted
         }
+    }
+
+    func recentRemoteTransferDirectories(for remoteID: UUID) -> [String] {
+        transferRemoteDirectoryHistory[remoteID.uuidString] ?? []
     }
 
     func activeSessionCount(for remoteID: UUID) -> Int {
@@ -256,6 +274,17 @@ final class AppState: ObservableObject {
             workspace.terminal.showFind()
             return nil
         }
+    }
+
+    deinit {
+        if let commandKeyMonitor {
+            NSEvent.removeMonitor(commandKeyMonitor)
+        }
+        restorationSaveTask?.cancel()
+        for task in inspectionTasks.values { task.cancel() }
+        for task in connectionTasks.values { task.cancel() }
+        for task in transferTasks.values { task.cancel() }
+        for control in transferControls.values { _ = control.stop() }
     }
 
     private func synchronizeSHCLILink() {
@@ -813,7 +842,17 @@ final class AppState: ObservableObject {
             let workspace = workspaces[workspaceID]
         else { return }
         workspace.terminal.disconnect(appendMessage: false)
+        connectionTasks.removeValue(forKey: workspaceID)?.cancel()
+        connectionTaskTokens.removeValue(forKey: workspaceID)
         workspace.portForwards.stopAll()
+        for transfer in workspace.transfers where
+            transfer.status == .queued || transfer.status == .running ||
+                transfer.status == .paused {
+            transferTasks[transfer.id]?.cancel()
+            _ = transferControls[transfer.id]?.stop()
+            transferTasks.removeValue(forKey: transfer.id)
+            transferControls.removeValue(forKey: transfer.id)
+        }
         workspaces.removeValue(forKey: workspaceID)
         activeWorkspaceIDs.remove(at: index)
         if lastWorkspaceByRemote[workspace.remoteID] == workspaceID {
@@ -1004,8 +1043,19 @@ final class AppState: ObservableObject {
 
     private func startConnection(in workspace: SessionWorkspace) {
         workspace.terminal.beginPreparingConnection()
-        Task { [weak self, weak workspace] in
-            guard let self, let workspace else { return }
+        let workspaceID = workspace.id
+        connectionTasks[workspaceID]?.cancel()
+        let taskToken = UUID()
+        connectionTaskTokens[workspaceID] = taskToken
+        connectionTasks[workspaceID] = Task { [weak self, weak workspace] in
+            guard let self else { return }
+            defer {
+                if self.connectionTaskTokens[workspaceID] == taskToken {
+                    self.connectionTasks[workspaceID] = nil
+                    self.connectionTaskTokens[workspaceID] = nil
+                }
+            }
+            guard let workspace else { return }
             // Local defaults are global settings. A restored workspace may
             // still carry the profile captured when its old shell was in `/`;
             // always resolve the current Local profile at process start.
@@ -2013,11 +2063,15 @@ final class AppState: ObservableObject {
             log: ""
         )
         workspace.transfers.insert(item, at: 0)
+        rememberTransferDirectories(for: item, remoteID: workspace.remoteID)
         let processControl = CommandProcessControl()
         transferControls[item.id] = processControl
 
-        Task {
-            defer { transferControls[item.id] = nil }
+        transferTasks[item.id] = Task {
+            defer {
+                transferControls[item.id] = nil
+                transferTasks[item.id] = nil
+            }
             guard processControl.state != .stopped else { return }
             updateTransfer(item.id, in: workspace) {
                 $0.status = processControl.state == .paused
@@ -2150,6 +2204,45 @@ final class AppState: ObservableObject {
                 }
             }
         }
+    }
+
+    private func rememberTransferDirectories(
+        for item: TransferItem,
+        remoteID: UUID
+    ) {
+        let localPath = item.direction == .upload
+            ? item.source
+            : item.destination
+        let localDirectory = URL(fileURLWithPath: localPath)
+            .deletingLastPathComponent()
+            .standardizedFileURL.path
+        transferLocalDirectoryHistory.removeAll { $0 == localDirectory }
+        transferLocalDirectoryHistory.insert(localDirectory, at: 0)
+        transferLocalDirectoryHistory = Array(
+            transferLocalDirectoryHistory.prefix(
+                TransferRecentDirectoryResolver.maximumCount
+            )
+        )
+        UserDefaults.standard.set(
+            transferLocalDirectoryHistory,
+            forKey: "transferLocalDirectoryHistory"
+        )
+
+        let remotePath = item.direction == .upload
+            ? item.destination
+            : item.source
+        let remoteDirectory = RemoteFileService.parent(of: remotePath)
+        let key = remoteID.uuidString
+        var remoteHistory = transferRemoteDirectoryHistory[key] ?? []
+        remoteHistory.removeAll { $0 == remoteDirectory }
+        remoteHistory.insert(remoteDirectory, at: 0)
+        transferRemoteDirectoryHistory[key] = Array(
+            remoteHistory.prefix(TransferRecentDirectoryResolver.maximumCount)
+        )
+        UserDefaults.standard.set(
+            transferRemoteDirectoryHistory,
+            forKey: "transferRemoteDirectoryHistory"
+        )
     }
 
     func pauseTransfer(

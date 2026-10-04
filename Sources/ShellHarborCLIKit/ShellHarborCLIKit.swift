@@ -884,6 +884,9 @@ public enum SHSSHCommandBuilder {
         guard profile.isConnectable else {
             throw SHCLIError.invalidRemote(profile.name)
         }
+        // Modern OpenSSH scp uses SFTP by default. Keeping each path as one
+        // argv element preserves wildcard handling while parentheses and other
+        // shell metacharacters remain literal path content.
         var arguments = ["-P", String(profile.resolvedPort)]
         arguments += hostKeyArguments(for: profile)
         arguments += authenticationArguments(for: profile)

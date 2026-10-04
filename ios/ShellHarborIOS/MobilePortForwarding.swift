@@ -55,9 +55,9 @@ enum MobilePortForwardError: LocalizedError {
 }
 
 final class MobilePortForwardGlue: ChannelDuplexHandler, @unchecked Sendable {
-    typealias InboundIn = NIOAny
-    typealias OutboundIn = NIOAny
-    typealias OutboundOut = NIOAny
+    typealias InboundIn = ByteBuffer
+    typealias OutboundIn = ByteBuffer
+    typealias OutboundOut = ByteBuffer
 
     private var partner: MobilePortForwardGlue?
     private var context: ChannelHandlerContext?
@@ -86,20 +86,21 @@ final class MobilePortForwardGlue: ChannelDuplexHandler, @unchecked Sendable {
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
-        partner?.context?.write(data, promise: nil)
+        partner?.write(unwrapInboundIn(data))
     }
 
     func channelReadComplete(context: ChannelHandlerContext) {
-        partner?.context?.flush()
+        partner?.flush()
     }
 
     func channelInactive(context: ChannelHandlerContext) {
-        partner?.context?.close(mode: .all, promise: nil)
+        partner?.close()
+        context.fireChannelInactive()
     }
 
     func errorCaught(context: ChannelHandlerContext, error: Error) {
         context.close(promise: nil)
-        partner?.context?.close(promise: nil)
+        partner?.close()
     }
 
     func read(context: ChannelHandlerContext) {
@@ -115,6 +116,39 @@ final class MobilePortForwardGlue: ChannelDuplexHandler, @unchecked Sendable {
             partner?.partnerBecameWritable()
         }
         context.fireChannelWritabilityChanged()
+    }
+
+    private func write(_ buffer: ByteBuffer) {
+        guard let context else { return }
+        let operation = {
+            context.write(NIOAny(buffer), promise: nil)
+        }
+        if context.eventLoop.inEventLoop {
+            operation()
+        } else {
+            context.eventLoop.execute(operation)
+        }
+    }
+
+    private func close() {
+        guard let context else { return }
+        let operation = {
+            context.close(mode: .all, promise: nil)
+        }
+        if context.eventLoop.inEventLoop {
+            operation()
+        } else {
+            context.eventLoop.execute(operation)
+        }
+    }
+
+    private func flush() {
+        guard let context else { return }
+        if context.eventLoop.inEventLoop {
+            context.flush()
+        } else {
+            context.eventLoop.execute { context.flush() }
+        }
     }
 
     private func partnerBecameWritable() {
@@ -147,6 +181,28 @@ final class MobilePortForwardStore {
     }
 
     func addRule() { rules.append(MobilePortForwardRule()) }
+
+    func startAll(sessions: [MobileSession]) {
+        for rule in rules {
+            if statuses[rule.id] == .starting { continue }
+            if case .running? = statuses[rule.id] { continue }
+            guard let sessionID = rule.selectedSessionID,
+                  let session = sessions.first(where: { $0.id == sessionID })
+            else {
+                statuses[rule.id] = .failed(
+                    MobilePortForwardError.sessionNotConnected.localizedDescription
+                )
+                continue
+            }
+            start(rule, using: session)
+        }
+    }
+
+    func stopAll() {
+        for id in Set(startTasks.keys).union(listeners.keys) {
+            stop(id)
+        }
+    }
 
     func removeRule(_ id: UUID) {
         stop(id)

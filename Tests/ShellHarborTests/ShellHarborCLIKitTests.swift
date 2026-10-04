@@ -435,6 +435,7 @@ final class ShellHarborCLIKitTests: XCTestCase {
         )
 
         XCTAssertEqual(invocation.executablePath, "/usr/bin/scp")
+        XCTAssertFalse(invocation.arguments.contains("-O"))
         XCTAssertTrue(invocation.arguments.contains("-r"))
         XCTAssertEqual(
             invocation.arguments.suffix(2),

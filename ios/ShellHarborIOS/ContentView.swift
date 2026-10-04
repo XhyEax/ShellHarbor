@@ -1,6 +1,7 @@
 import SwiftUI
 import UniformTypeIdentifiers
 import CoreLocation
+import SafariServices
 
 private enum MobileBackgroundKeepAliveSettings {
     static let defaultMaxMinutes = 15
@@ -480,7 +481,11 @@ private struct IOSTailscaleView: View {
 
 private struct IOSPortForwardView: View {
     @Environment(RemoteStore.self) private var remoteStore
-    @State private var forwardStore = MobilePortForwardStore()
+    @State private var browserTarget: MobileBrowserTarget?
+
+    private var forwardStore: MobilePortForwardStore {
+        remoteStore.portForwardStore
+    }
 
     private var availableSessions: [MobileSession] {
         remoteStore.sessions.filter {
@@ -497,41 +502,20 @@ private struct IOSPortForwardView: View {
                     Text("本机 IP：\(MobileLocalNetworkAddresses.ipv4.joined(separator: "  "))")
                         .font(.caption)
                         .textSelection(.enabled)
-                }
-                ForEach($forwardStore.rules) { $rule in
-                    Section {
-                        Picker("SSH Session", selection: $rule.selectedSessionID) {
-                            Text("请选择").tag(UUID?.none)
-                            ForEach(availableSessions) { session in
-                                Text(session.displayName).tag(Optional(session.id))
-                            }
+                    HStack {
+                        Button("全部启用") {
+                            forwardStore.startAll(sessions: availableSessions)
                         }
-                        TextField("监听地址", text: $rule.bindHost)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                        TextField(
-                            "监听端口",
-                            value: $rule.listenPort,
-                            format: .number.grouping(.never)
-                        )
-                        .keyboardType(.numberPad)
-                        TextField("目标地址", text: $rule.targetHost)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                        TextField(
-                            "目标端口",
-                            value: $rule.targetPort,
-                            format: .number.grouping(.never)
-                        )
-                        .keyboardType(.numberPad)
-                        forwardStatus(rule)
-                    } header: {
-                        HStack {
-                            Text("端口转发")
-                            Spacer()
-                            Button(role: .destructive) {
-                                forwardStore.removeRule(rule.id)
-                            } label: { Image(systemName: "trash") }
+                        .disabled(availableSessions.isEmpty || forwardStore.rules.isEmpty)
+                        Button("全部停止", role: .destructive) {
+                            forwardStore.stopAll()
+                        }
+                    }
+                }
+                ForEach(groupedRemoteIDs, id: \.self) { remoteID in
+                    Section(remoteName(for: remoteID)) {
+                        ForEach(ruleIndexes(for: remoteID), id: \.self) { index in
+                            ruleEditor($forwardStore.rules[index])
                         }
                     }
                 }
@@ -544,7 +528,79 @@ private struct IOSPortForwardView: View {
             .onChange(of: availableSessions.map(\.id)) { _, _ in
                 selectDefaultSessionsIfNeeded()
             }
+            .sheet(item: $browserTarget) { target in
+                MobileEmbeddedBrowser(url: target.url)
+                    .ignoresSafeArea()
+            }
         }
+    }
+
+    @ViewBuilder
+    private func ruleEditor(_ rule: Binding<MobilePortForwardRule>) -> some View {
+        let value = rule.wrappedValue
+        VStack(alignment: .leading) {
+            HStack {
+                Text("端口转发")
+                    .font(.headline)
+                Spacer()
+                Button(role: .destructive) {
+                    forwardStore.removeRule(value.id)
+                } label: { Image(systemName: "trash") }
+            }
+            Picker("SSH Session", selection: rule.selectedSessionID) {
+                Text("请选择").tag(UUID?.none)
+                ForEach(availableSessions) { session in
+                    Text(session.displayName).tag(Optional(session.id))
+                }
+            }
+            TextField("监听地址", text: rule.bindHost)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+            TextField(
+                "监听端口",
+                value: rule.listenPort,
+                format: .number.grouping(.never)
+            )
+            .keyboardType(.numberPad)
+            TextField("目标地址", text: rule.targetHost)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+            TextField(
+                "目标端口",
+                value: rule.targetPort,
+                format: .number.grouping(.never)
+            )
+            .keyboardType(.numberPad)
+            forwardStatus(value)
+        }
+    }
+
+    private var groupedRemoteIDs: [UUID?] {
+        var values: [UUID?] = []
+        for rule in forwardStore.rules {
+            let remoteID = rule.selectedSessionID.flatMap { sessionID in
+                remoteStore.sessions.first(where: { $0.id == sessionID })?.remote.id
+            }
+            if !values.contains(where: { $0 == remoteID }) {
+                values.append(remoteID)
+            }
+        }
+        return values
+    }
+
+    private func ruleIndexes(for remoteID: UUID?) -> [Int] {
+        forwardStore.rules.indices.filter { index in
+            let ruleRemoteID = forwardStore.rules[index].selectedSessionID.flatMap { sessionID in
+                remoteStore.sessions.first(where: { $0.id == sessionID })?.remote.id
+            }
+            return ruleRemoteID == remoteID
+        }
+    }
+
+    private func remoteName(for remoteID: UUID?) -> String {
+        guard let remoteID else { return "未分组" }
+        return remoteStore.sessions.first(where: { $0.remote.id == remoteID })?.remoteName
+            ?? "Remote"
     }
 
     private func selectedSession(for rule: MobilePortForwardRule) -> MobileSession? {
@@ -560,6 +616,11 @@ private struct IOSPortForwardView: View {
             Text(statusText(status, rule: rule)).textSelection(.enabled)
             Spacer()
             if case .running = status {
+                Button {
+                    openForwardInBrowser(rule, status: status)
+                } label: {
+                    Image(systemName: "safari")
+                }
                 Button("停止", role: .destructive) { forwardStore.stop(rule.id) }
             } else {
                 Button("启动") {
@@ -569,6 +630,18 @@ private struct IOSPortForwardView: View {
                 .disabled(selectedSession(for: rule) == nil || status == .starting)
             }
         }
+    }
+
+    private func openForwardInBrowser(
+        _ rule: MobilePortForwardRule,
+        status: MobilePortForwardStore.Status
+    ) {
+        guard case let .running(port) = status else { return }
+        let host = rule.bindHost == "0.0.0.0" || rule.bindHost.isEmpty
+            ? "127.0.0.1"
+            : rule.bindHost
+        guard let url = URL(string: "http://\(host):\(port)/") else { return }
+        browserTarget = MobileBrowserTarget(url: url)
     }
 
     private func selectDefaultSessionsIfNeeded() {
@@ -599,6 +672,24 @@ private struct IOSPortForwardView: View {
         case .failed: .red
         }
     }
+}
+
+private struct MobileBrowserTarget: Identifiable {
+    let url: URL
+    var id: String { url.absoluteString }
+}
+
+private struct MobileEmbeddedBrowser: UIViewControllerRepresentable {
+    let url: URL
+
+    func makeUIViewController(context: Context) -> SFSafariViewController {
+        SFSafariViewController(url: url)
+    }
+
+    func updateUIViewController(
+        _ uiViewController: SFSafariViewController,
+        context: Context
+    ) {}
 }
 
 private struct TailscaleDisplayStatus {

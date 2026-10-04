@@ -42,6 +42,9 @@ import os.log
  * defaults, otherwise, this uses its own set of defaults colors.
  */
 open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, TerminalDelegate {
+    /// Invoked for Command-clicked filesystem-looking text that is not an
+    /// OSC-8/URL payload. Hosts can use this to reveal local or remote files.
+    public var filePathClickHandler: ((String) -> Void)?
 #if canImport(MetalKit)
     // Default to throttling Metal redraws during live-resize; set SWIFTTERM_METAL_LIVE_RESIZE_THROTTLE=0 to disable.
     private static let metalLiveResizeThrottleEnabled: Bool = {
@@ -2234,10 +2237,10 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
 
     private func performFind(next: Bool) {
         let termFromBar = (findBar?.isHidden == false) ? findBar?.searchText : nil
-        guard let term = termFromBar ?? findPasteboardString(), !term.isEmpty else {
+        let term = termFromBar ?? findBarTerm
+        guard !term.isEmpty else {
             return
         }
-        updateFindPasteboard(term)
         let options = findBar?.options ?? SearchOptions()
         isPerformingFindNavigation = true
         defer { isPerformingFindNavigation = false }
@@ -2254,20 +2257,8 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         guard !selected.isEmpty else {
             return
         }
-        let pasteboard = NSPasteboard(name: .find)
-        pasteboard.clearContents()
-        pasteboard.setString(selected, forType: .string)
-    }
-
-    private func findPasteboardString() -> String? {
-        let pasteboard = NSPasteboard(name: .find)
-        return pasteboard.string(forType: .string)
-    }
-
-    private func updateFindPasteboard(_ term: String) {
-        let pasteboard = NSPasteboard(name: .find)
-        pasteboard.clearContents()
-        pasteboard.setString(term, forType: .string)
+        findBarTerm = selected
+        findBar?.searchText = selected
     }
 
     private func ensureFindBar() -> TerminalFindBarView {
@@ -2309,8 +2300,8 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         let bar = ensureFindBar()
         bar.isHidden = false
         let selectedText = prefillSelection ? selection.getSelectedText() : nil
-        let initial = (selectedText?.isEmpty == false) ? selectedText : findPasteboardString()
-        if let initial {
+        let initial = (selectedText?.isEmpty == false) ? selectedText! : findBarTerm
+        if !initial.isEmpty {
             bar.searchText = initial
             handleFindBarSearchChanged(initial)
         } else {
@@ -2324,6 +2315,16 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     /// application menu responder chain.
     public func showFindInterface() {
         showFindBar(prefillSelection: true)
+    }
+
+    /// Opens find with an explicit query without reading or mutating a
+    /// pasteboard. Useful for hosts that keep search state in their own UI.
+    public func showFindInterface(searchTerm: String) {
+        let bar = ensureFindBar()
+        bar.isHidden = false
+        bar.searchText = searchTerm
+        handleFindBarSearchChanged(searchTerm)
+        bar.focus()
     }
 
     /// Finds the next or previous match using the active find bar value.
@@ -2345,7 +2346,6 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
             clearFindPresentation()
             return
         }
-        updateFindPasteboard(term)
         isPerformingFindNavigation = true
         defer { isPerformingFindNavigation = false }
         _ = findNext(term, options: findBarOptions)
@@ -2401,8 +2401,16 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     private func refreshFindPresentation(term: String, options: SearchOptions) {
         ensureFindDecorationViews()
         findResults = search.findAll(term: term, options: options, limit: 1000)
-        let summary = searchMatchSummary(term, options: options, limit: 1000)
-        findBar?.setMatchSummary(index: summary.index, total: summary.total)
+        let current = search.lastResult
+        let currentIndex = current.flatMap { current in
+            findResults.firstIndex(where: {
+                $0.row == current.row && $0.col == current.col
+            })
+        }.map { $0 + 1 } ?? 0
+        findBar?.setMatchSummary(
+            index: currentIndex,
+            total: findResults.count
+        )
         updateFindDecorationGeometry()
     }
 
@@ -2690,6 +2698,11 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
             terminalDelegate?.requestOpenLink(source: self, link: result.link, params: result.params)
             return
         }
+        if event.modifierFlags.contains(.command),
+           let path = filePathCandidate(at: hit) {
+            filePathClickHandler?(path)
+            return
+        }
         if allowMouseReporting && !shiftBypassesMouseReporting(for: event) && terminal.mouseMode.sendButtonRelease() {
             sharedMouseEvent(with: event)
             return
@@ -2701,6 +2714,36 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         #endif
         
         didSelectionDrag = false
+    }
+
+    private func filePathCandidate(at hit: Position) -> String? {
+        let line = terminal.displayBuffer.translateBufferLineToString(
+            lineIndex: hit.row,
+            trimRight: true,
+            startCol: 0,
+            endCol: -1,
+            skipNullCellsFollowingWide: true,
+            characterProvider: { self.terminal.getCharacter(for: $0) }
+        )
+        guard !line.isEmpty else { return nil }
+        let characters = Array(line)
+        let clicked = min(max(hit.col, 0), max(characters.count - 1, 0))
+        var lower = clicked
+        var upper = clicked
+        while lower > 0, !characters[lower - 1].isWhitespace { lower -= 1 }
+        while upper + 1 < characters.count,
+              !characters[upper + 1].isWhitespace { upper += 1 }
+        var candidate = String(characters[lower...upper])
+        candidate = candidate.trimmingCharacters(
+            in: CharacterSet(charactersIn: "\"'`<>,;:")
+        )
+        while candidate.last == "." || candidate.last == ":" {
+            candidate.removeLast()
+        }
+        guard candidate.hasPrefix("/") || candidate.hasPrefix("./") ||
+                candidate.hasPrefix("../") || candidate.hasPrefix("~/")
+        else { return nil }
+        return candidate.replacingOccurrences(of: "\\ ", with: " ")
     }
     
     open override func mouseDragged(with event: NSEvent) {

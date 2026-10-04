@@ -119,7 +119,15 @@ private struct TerminalPanel: View {
                         theme: state.terminalTheme,
                         fontFamily: state.terminalFont,
                         fontSize: state.terminalFontSize,
-                        isActive: isActive
+                        isActive: isActive,
+                        onFilePathClicked: { path in
+                            workspace.mode = .files
+                            if workspace.profile.isLocalConnection {
+                                state.navigateLocal(to: path, in: workspace)
+                            } else {
+                                state.navigateRemote(to: path, in: workspace)
+                            }
+                        }
                     )
                     .id(controller.connectionToken)
                 } else {
