@@ -2725,15 +2725,54 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
             skipNullCellsFollowingWide: true,
             characterProvider: { self.terminal.getCharacter(for: $0) }
         )
+        return Self.filePathCandidate(in: line, at: hit.col)
+    }
+
+    static func filePathCandidate(in line: String, at column: Int) -> String? {
         guard !line.isEmpty else { return nil }
         let characters = Array(line)
-        let clicked = min(max(hit.col, 0), max(characters.count - 1, 0))
-        var lower = clicked
-        var upper = clicked
-        while lower > 0, !characters[lower - 1].isWhitespace { lower -= 1 }
-        while upper + 1 < characters.count,
-              !characters[upper + 1].isWhitespace { upper += 1 }
-        var candidate = String(characters[lower...upper])
+        let clicked = min(max(column, 0), max(characters.count - 1, 0))
+        var quote: Character?
+        var escaped = false
+        var spans: [ClosedRange<Int>] = []
+        var start: Int?
+        for index in characters.indices {
+            let character = characters[index]
+            if escaped {
+                escaped = false
+                if start == nil { start = index - 1 }
+                continue
+            }
+            if character == "\\" {
+                escaped = true
+                if start == nil { start = index }
+                continue
+            }
+            if character == "\"" || character == "'" {
+                if quote == character {
+                    quote = nil
+                } else if quote == nil {
+                    quote = character
+                }
+                if start == nil { start = index }
+                continue
+            }
+            if character.isWhitespace, quote == nil {
+                if let start, start < index {
+                    spans.append(start...(index - 1))
+                }
+                start = nil
+            } else if start == nil {
+                start = index
+            }
+        }
+        if let start {
+            spans.append(start...(characters.count - 1))
+        }
+        guard let span = spans.first(where: { $0.contains(clicked) }) else {
+            return nil
+        }
+        var candidate = String(characters[span])
         candidate = candidate.trimmingCharacters(
             in: CharacterSet(charactersIn: "\"'`<>,;:")
         )
@@ -2743,7 +2782,10 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         guard candidate.hasPrefix("/") || candidate.hasPrefix("./") ||
                 candidate.hasPrefix("../") || candidate.hasPrefix("~/")
         else { return nil }
-        return candidate.replacingOccurrences(of: "\\ ", with: " ")
+        return candidate
+            .replacingOccurrences(of: "\\ ", with: " ")
+            .replacingOccurrences(of: "\\(", with: "(")
+            .replacingOccurrences(of: "\\)", with: ")")
     }
     
     open override func mouseDragged(with event: NSEvent) {

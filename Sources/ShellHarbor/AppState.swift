@@ -54,13 +54,9 @@ final class AppState: ObservableObject {
     @Published private(set) var globalLocalPathHistory: [String] =
         UserDefaults.standard.stringArray(forKey: "globalLocalPathHistory") ?? []
     @Published private(set) var transferLocalDirectoryHistory: [String] =
-        UserDefaults.standard.stringArray(
-            forKey: "transferLocalDirectoryHistory"
-        ) ?? []
+        TransferDirectoryHistoryStore.localHistory()
     private var transferRemoteDirectoryHistory: [String: [String]] =
-        UserDefaults.standard.dictionary(
-            forKey: "transferRemoteDirectoryHistory"
-        ) as? [String: [String]] ?? [:]
+        TransferDirectoryHistoryStore.remoteHistory()
     @Published var shcliLinkEnabled = SHCLILinkPreferences.savedEnabled {
         didSet {
             SHCLILinkPreferences.save(enabled: shcliLinkEnabled)
@@ -2216,16 +2212,9 @@ final class AppState: ObservableObject {
         let localDirectory = URL(fileURLWithPath: localPath)
             .deletingLastPathComponent()
             .standardizedFileURL.path
-        transferLocalDirectoryHistory.removeAll { $0 == localDirectory }
-        transferLocalDirectoryHistory.insert(localDirectory, at: 0)
-        transferLocalDirectoryHistory = Array(
-            transferLocalDirectoryHistory.prefix(
-                TransferRecentDirectoryResolver.maximumCount
-            )
-        )
-        UserDefaults.standard.set(
-            transferLocalDirectoryHistory,
-            forKey: "transferLocalDirectoryHistory"
+        transferLocalDirectoryHistory = TransferRecentDirectoryResolver.inserting(
+            localDirectory,
+            into: transferLocalDirectoryHistory
         )
 
         let remotePath = item.direction == .upload
@@ -2233,15 +2222,14 @@ final class AppState: ObservableObject {
             : item.source
         let remoteDirectory = RemoteFileService.parent(of: remotePath)
         let key = remoteID.uuidString
-        var remoteHistory = transferRemoteDirectoryHistory[key] ?? []
-        remoteHistory.removeAll { $0 == remoteDirectory }
-        remoteHistory.insert(remoteDirectory, at: 0)
-        transferRemoteDirectoryHistory[key] = Array(
-            remoteHistory.prefix(TransferRecentDirectoryResolver.maximumCount)
-        )
-        UserDefaults.standard.set(
-            transferRemoteDirectoryHistory,
-            forKey: "transferRemoteDirectoryHistory"
+        transferRemoteDirectoryHistory[key] =
+            TransferRecentDirectoryResolver.inserting(
+                remoteDirectory,
+                into: transferRemoteDirectoryHistory[key] ?? []
+            )
+        TransferDirectoryHistoryStore.persist(
+            localHistory: transferLocalDirectoryHistory,
+            remoteHistory: transferRemoteDirectoryHistory
         )
     }
 

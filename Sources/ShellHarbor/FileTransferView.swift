@@ -134,6 +134,12 @@ enum TransferRecentDirectoryResolver {
         )
     }
 
+    static func inserting(_ directory: String, into history: [String]) -> [String] {
+        var updated = history.filter { $0 != directory }
+        updated.insert(directory, at: 0)
+        return Array(updated.prefix(maximumCount))
+    }
+
     private static func uniqueDirectories(
         _ directories: [String]
     ) -> [String] {
@@ -144,6 +150,32 @@ enum TransferRecentDirectoryResolver {
         }
         .prefix(maximumCount)
         .map { $0 }
+    }
+}
+
+enum TransferDirectoryHistoryStore {
+    private static let localKey = "transferLocalDirectoryHistory"
+    private static let remoteKey = "transferRemoteDirectoryHistory"
+
+    static func localHistory(
+        defaults: UserDefaults = .standard
+    ) -> [String] {
+        defaults.stringArray(forKey: localKey) ?? []
+    }
+
+    static func remoteHistory(
+        defaults: UserDefaults = .standard
+    ) -> [String: [String]] {
+        defaults.dictionary(forKey: remoteKey) as? [String: [String]] ?? [:]
+    }
+
+    static func persist(
+        localHistory: [String],
+        remoteHistory: [String: [String]],
+        defaults: UserDefaults = .standard
+    ) {
+        defaults.set(localHistory, forKey: localKey)
+        defaults.set(remoteHistory, forKey: remoteKey)
     }
 }
 

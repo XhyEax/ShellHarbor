@@ -18,6 +18,7 @@
 		A30000000000000000000005 /* Frameworks/Protobuf_C_.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = A30000000000000000000006 /* Frameworks/Protobuf_C_.xcframework */; };
 		A30000000000000000000007 /* libz.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = A30000000000000000000008 /* libz.tbd */; };
 		A30000000000000000000009 /* Frameworks/Protobuf_C_.xcframework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = A30000000000000000000006 /* Frameworks/Protobuf_C_.xcframework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		B10000000000000000000001 /* NIOEmbedded in Frameworks */ = {isa = PBXBuildFile; productRef = B10000000000000000000002 /* NIOEmbedded */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -34,8 +35,19 @@
 		};
 /* End PBXCopyFilesBuildPhase section */
 
+/* Begin PBXContainerItemProxy section */
+		B10000000000000000000003 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A10000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A10000000000000000000002;
+			remoteInfo = ShellHarborIOS;
+		};
+/* End PBXContainerItemProxy section */
+
 /* Begin PBXFileReference section */
 		A1000000000000000000000B /* ShellHarborIOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ShellHarborIOS.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		B10000000000000000000004 /* ShellHarborIOSTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ShellHarborIOSTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		A30000000000000000000002 /* Frameworks/ShellHarborTS.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; path = Frameworks/ShellHarborTS.xcframework; sourceTree = SOURCE_ROOT; };
 		A30000000000000000000004 /* Frameworks/mosh.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; path = Frameworks/mosh.xcframework; sourceTree = SOURCE_ROOT; };
 		A30000000000000000000006 /* Frameworks/Protobuf_C_.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; path = Frameworks/Protobuf_C_.xcframework; sourceTree = SOURCE_ROOT; };
@@ -61,6 +73,11 @@
 			path = ShellHarborIOS;
 			sourceTree = "<group>";
 		};
+		B10000000000000000000005 /* ShellHarborIOSTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = ShellHarborIOSTests;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -81,6 +98,14 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		B10000000000000000000006 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B10000000000000000000001 /* NIOEmbedded in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -88,6 +113,7 @@
 			isa = PBXGroup;
 			children = (
 				A1000000000000000000000A /* ShellHarborIOS */,
+				B10000000000000000000005 /* ShellHarborIOSTests */,
 				A30000000000000000000002 /* Frameworks/ShellHarborTS.xcframework */,
 				A30000000000000000000004 /* Frameworks/mosh.xcframework */,
 				A30000000000000000000006 /* Frameworks/Protobuf_C_.xcframework */,
@@ -100,6 +126,7 @@
 			isa = PBXGroup;
 			children = (
 				A1000000000000000000000B /* ShellHarborIOS.app */,
+				B10000000000000000000004 /* ShellHarborIOSTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -136,6 +163,30 @@
 			productReference = A1000000000000000000000B /* ShellHarborIOS.app */;
 			productType = "com.apple.product-type.application";
 		};
+		B10000000000000000000007 /* ShellHarborIOSTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = B10000000000000000000008 /* Build configuration list for PBXNativeTarget "ShellHarborIOSTests" */;
+			buildPhases = (
+				B10000000000000000000009 /* Sources */,
+				B10000000000000000000006 /* Frameworks */,
+				B1000000000000000000000A /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				B1000000000000000000000B /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				B10000000000000000000005 /* ShellHarborIOSTests */,
+			);
+			name = ShellHarborIOSTests;
+			packageProductDependencies = (
+				B10000000000000000000002 /* NIOEmbedded */,
+			);
+			productName = ShellHarborIOSTests;
+			productReference = B10000000000000000000004 /* ShellHarborIOSTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -148,6 +199,10 @@
 				TargetAttributes = {
 					A10000000000000000000002 = {
 						CreatedOnToolsVersion = 26.0;
+					};
+					B10000000000000000000007 = {
+						CreatedOnToolsVersion = 26.0;
+						TestTargetID = A10000000000000000000002;
 					};
 				};
 			};
@@ -175,12 +230,20 @@
 			projectRoot = "";
 			targets = (
 				A10000000000000000000002 /* ShellHarborIOS */,
+				B10000000000000000000007 /* ShellHarborIOSTests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
 		A10000000000000000000007 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		B1000000000000000000000A /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -197,7 +260,22 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		B10000000000000000000009 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		B1000000000000000000000B /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = A10000000000000000000002 /* ShellHarborIOS */;
+			targetProxy = B10000000000000000000003 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		A1000000000000000000000C /* Debug */ = {
@@ -233,6 +311,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = BFD6WTWN8R;
+				ENABLE_TESTABILITY = YES;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = ShellHarborIOS/Info.plist;
@@ -306,6 +385,38 @@
 			};
 			name = Release;
 		};
+		B1000000000000000000000C /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = BFD6WTWN8R;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.xhyeax.ShellHarborIOSTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/ShellHarborIOS.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/ShellHarborIOS";
+			};
+			name = Debug;
+		};
+		B1000000000000000000000D /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = BFD6WTWN8R;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.xhyeax.ShellHarborIOSTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/ShellHarborIOS.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/ShellHarborIOS";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -323,6 +434,15 @@
 			buildConfigurations = (
 				A1000000000000000000000E /* Debug */,
 				A1000000000000000000000F /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		B10000000000000000000008 /* Build configuration list for PBXNativeTarget "ShellHarborIOSTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				B1000000000000000000000C /* Debug */,
+				B1000000000000000000000D /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
@@ -405,6 +525,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = A20000000000000000000011 /* XCLocalSwiftPackageReference "Vendor/swift-crypto" */;
 			productName = _CryptoExtras;
+		};
+		B10000000000000000000002 /* NIOEmbedded */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A20000000000000000000009 /* XCRemoteSwiftPackageReference "swift-nio" */;
+			productName = NIOEmbedded;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

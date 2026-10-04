@@ -111,7 +111,7 @@ open class LocalProcessTerminalView: TerminalView, TerminalViewDelegate, LocalPr
     /// programs attached shortly after process startup (such as tmux) can miss
     /// the first resize that occurred before they became active.
     public func reapplyCurrentWindowSize() {
-        guard process.running else { return }
+        guard propagatesSizeChangesToProcess, process.running else { return }
         var size = getWindowSize()
         _ = PseudoTerminalHelpers.setWinSize(
             masterPtyDescriptor: process.childfd,

@@ -42,6 +42,59 @@ struct MobilePortForwardRule: Codable, Identifiable, Equatable {
     var targetPort = 80
 }
 
+struct MobilePortForwardRuleGroup: Identifiable, Equatable {
+    let remoteID: UUID?
+    let ruleIDs: [UUID]
+
+    var id: String { remoteID?.uuidString ?? "__ungrouped__" }
+}
+
+enum MobilePortForwardPresentation {
+    static func groups(
+        rules: [MobilePortForwardRule],
+        sessionRemoteIDs: [UUID: UUID]
+    ) -> [MobilePortForwardRuleGroup] {
+        var order: [UUID?] = []
+        var ruleIDs: [String: [UUID]] = [:]
+        for rule in rules {
+            let remoteID = rule.selectedSessionID.flatMap {
+                sessionRemoteIDs[$0]
+            }
+            if !order.contains(where: { $0 == remoteID }) {
+                order.append(remoteID)
+            }
+            let key = remoteID?.uuidString ?? "__ungrouped__"
+            ruleIDs[key, default: []].append(rule.id)
+        }
+        return order.map { remoteID in
+            let key = remoteID?.uuidString ?? "__ungrouped__"
+            return MobilePortForwardRuleGroup(
+                remoteID: remoteID,
+                ruleIDs: ruleIDs[key, default: []]
+            )
+        }
+    }
+
+    static func browserURL(
+        for rule: MobilePortForwardRule,
+        listeningPort: Int
+    ) -> URL? {
+        guard (1...65_535).contains(listeningPort) else { return nil }
+        let configuredHost = rule.bindHost.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        let host = configuredHost.isEmpty || configuredHost == "0.0.0.0"
+            ? "127.0.0.1"
+            : configuredHost
+        var components = URLComponents()
+        components.scheme = "http"
+        components.host = host
+        components.port = listeningPort
+        components.path = "/"
+        return components.url
+    }
+}
+
 enum MobilePortForwardError: LocalizedError {
     case sessionNotConnected
     case invalidConfiguration
@@ -152,9 +205,17 @@ final class MobilePortForwardGlue: ChannelDuplexHandler, @unchecked Sendable {
     }
 
     private func partnerBecameWritable() {
-        guard pendingRead else { return }
-        pendingRead = false
-        context?.read()
+        guard let context else { return }
+        let operation = { [weak self] in
+            guard let self, self.pendingRead else { return }
+            self.pendingRead = false
+            context.read()
+        }
+        if context.eventLoop.inEventLoop {
+            operation()
+        } else {
+            context.eventLoop.execute(operation)
+        }
     }
 }
 
@@ -173,9 +234,12 @@ final class MobilePortForwardStore {
     private(set) var statuses: [UUID: Status] = [:]
     @ObservationIgnored private var listeners: [UUID: Channel] = [:]
     @ObservationIgnored private var startTasks: [UUID: Task<Void, Never>] = [:]
+    @ObservationIgnored private var startTokens: [UUID: UUID] = [:]
+    @ObservationIgnored private let defaults: UserDefaults
 
-    init() {
-        rules = UserDefaults.standard.data(forKey: "mobilePortForwardRules")
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        rules = defaults.data(forKey: "mobilePortForwardRules")
             .flatMap { try? JSONDecoder().decode([MobilePortForwardRule].self, from: $0) }
             ?? [MobilePortForwardRule()]
     }
@@ -220,8 +284,15 @@ final class MobilePortForwardStore {
         }
         statuses[rule.id] = .starting
         let requestedPort = rule.listenPort
+        let token = UUID()
+        startTokens[rule.id] = token
         startTasks[rule.id] = Task { [weak self] in
             guard let self else { return }
+            defer {
+                if startTokens[rule.id] == token {
+                    startTasks[rule.id] = nil
+                }
+            }
             do {
                 let channel = try await session.controller.startLocalPortForward(
                     bindHost: rule.bindHost,
@@ -233,16 +304,22 @@ final class MobilePortForwardStore {
                     try? await channel.close()
                     return
                 }
+                guard startTokens[rule.id] == token else {
+                    try? await channel.close()
+                    return
+                }
                 listeners[rule.id] = channel
                 statuses[rule.id] = .running(channel.localAddress?.port ?? requestedPort)
             } catch {
-                statuses[rule.id] = .failed(error.localizedDescription)
+                if startTokens[rule.id] == token {
+                    statuses[rule.id] = .failed(error.localizedDescription)
+                }
             }
-            startTasks[rule.id] = nil
         }
     }
 
     func stop(_ id: UUID) {
+        startTokens[id] = nil
         startTasks[id]?.cancel()
         startTasks[id] = nil
         let active = listeners.removeValue(forKey: id)
@@ -252,6 +329,6 @@ final class MobilePortForwardStore {
 
     private func persist() {
         guard let data = try? JSONEncoder().encode(rules) else { return }
-        UserDefaults.standard.set(data, forKey: "mobilePortForwardRules")
+        defaults.set(data, forKey: "mobilePortForwardRules")
     }
 }

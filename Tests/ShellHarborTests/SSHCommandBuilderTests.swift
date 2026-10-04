@@ -4,7 +4,7 @@ import UniformTypeIdentifiers
 import XCTest
 @testable import ShellHarbor
 import ShellHarborCLIKit
-import SwiftTerm
+@testable import SwiftTerm
 
 final class SSHCommandBuilderTests: XCTestCase {
     func testPortForwardDefaultsToAllLocalInterfaces() {
@@ -1621,6 +1621,26 @@ final class SSHCommandBuilderTests: XCTestCase {
         )
     }
 
+    @MainActor
+    func testTerminalFilePathCandidateHandlesQuotedAndEscapedPaths() {
+        let escaped = "open ~/Build\\ Output/App\\(Debug\\).log now"
+        XCTAssertEqual(
+            SwiftTerm.TerminalView.filePathCandidate(in: escaped, at: 16),
+            "~/Build Output/App(Debug).log"
+        )
+        let quoted = "cat \"/tmp/folder with spaces/report.txt\""
+        XCTAssertEqual(
+            SwiftTerm.TerminalView.filePathCandidate(in: quoted, at: 20),
+            "/tmp/folder with spaces/report.txt"
+        )
+        XCTAssertNil(
+            SwiftTerm.TerminalView.filePathCandidate(
+                in: "ordinary output without a path",
+                at: 4
+            )
+        )
+    }
+
     func testRemotePathNavigation() {
         XCTAssertEqual(RemoteFileService.parent(of: "~/a/b"), "~/a")
         XCTAssertEqual(RemoteFileService.parent(of: "~/a"), "~")
@@ -1971,6 +1991,101 @@ final class SSHCommandBuilderTests: XCTestCase {
         await Task.yield()
 
         XCTAssertTrue(containsSearchField(in: terminal))
+    }
+
+    @MainActor
+    func testTerminalViewReleasesObserversAndFindState() {
+        weak var releasedView: SteadyCursorTerminalView?
+
+        autoreleasepool {
+            let terminal = SteadyCursorTerminalView(frame: .init(
+                x: 0,
+                y: 0,
+                width: 800,
+                height: 500
+            ))
+            terminal.configureResizeAuthority()
+            terminal.configureScrollerAutoHide()
+            terminal.feed(text: "memory-leak-sentinel")
+            terminal.showFindInterface(searchTerm: "sentinel")
+            releasedView = terminal
+        }
+
+        // AppKit may retain an autoreleased responder/view until a later main
+        // run-loop drain. Give that normal framework cleanup a bounded window;
+        // a real observer or callback retain cycle will still fail this check.
+        let deadline = Date(timeIntervalSinceNow: 2)
+        while releasedView != nil, Date() < deadline {
+            autoreleasepool {
+                RunLoop.main.run(
+                    until: Date(timeIntervalSinceNow: 0.02)
+                )
+            }
+        }
+        XCTAssertNil(releasedView)
+    }
+
+    @MainActor
+    func testResizeAuthorityRequiresForegroundKeyUnlockedSession() {
+        XCTAssertTrue(SteadyCursorTerminalView.shouldPropagateRemoteResize(
+            workspaceIsActive: true,
+            macSessionIsActive: true,
+            applicationIsActive: true,
+            windowIsKey: true
+        ))
+        for disabledIndex in 0..<4 {
+            var conditions = [true, true, true, true]
+            conditions[disabledIndex] = false
+            XCTAssertFalse(SteadyCursorTerminalView.shouldPropagateRemoteResize(
+                workspaceIsActive: conditions[0],
+                macSessionIsActive: conditions[1],
+                applicationIsActive: conditions[2],
+                windowIsKey: conditions[3]
+            ))
+        }
+    }
+
+    @MainActor
+    func testLongTerminalSearchIsBoundedAndDoesNotTouchFindPasteboard() {
+        let findPasteboard = NSPasteboard(name: .find)
+        let previousFindText = findPasteboard.string(forType: .string)
+        defer {
+            findPasteboard.clearContents()
+            if let previousFindText {
+                findPasteboard.setString(previousFindText, forType: .string)
+            }
+        }
+        findPasteboard.clearContents()
+        findPasteboard.setString("keep-this-value", forType: .string)
+
+        let terminal = SteadyCursorTerminalView(frame: .init(
+            x: 0,
+            y: 0,
+            width: 800,
+            height: 500
+        ))
+        terminal.getTerminal().changeScrollback(35_000)
+        let output = (0..<30_000).map { line in
+            line.isMultiple(of: 100)
+                ? "needle long output line \(line)\r\n"
+                : "ordinary long output line \(line)\r\n"
+        }.joined()
+        terminal.feed(text: output)
+
+        let startedAt = ContinuousClock.now
+        terminal.showFindInterface(searchTerm: "needle")
+        let elapsed = ContinuousClock.now - startedAt
+
+        XCTAssertEqual(terminal.searchMatchSummary("needle").total, 300)
+        XCTAssertLessThan(elapsed, .seconds(5))
+        XCTAssertEqual(
+            findPasteboard.string(forType: .string),
+            "keep-this-value"
+        )
+        XCTAssertLessThanOrEqual(
+            terminal.getTerminal().buffer.lines.count,
+            35_000 + terminal.getTerminal().rows
+        )
     }
 
     @MainActor
@@ -2500,6 +2615,41 @@ final class SSHCommandBuilderTests: XCTestCase {
                 from: transfers
             ),
             ["/var/mobile/Documents", "/var/log"]
+        )
+    }
+
+    func testTransferDirectoryHistorySurvivesWithoutOpenWorkspace() {
+        let suiteName = "ShellHarborTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let remoteID = UUID()
+        let localHistory = ["/Users/test/Downloads/archive"]
+        let remoteHistory = [remoteID.uuidString: ["/srv/releases"]]
+
+        TransferDirectoryHistoryStore.persist(
+            localHistory: localHistory,
+            remoteHistory: remoteHistory,
+            defaults: defaults
+        )
+
+        // Loading does not depend on a live SessionWorkspace. This is the
+        // relaunch/closed-Remote path that previously showed no directories.
+        XCTAssertEqual(
+            TransferDirectoryHistoryStore.localHistory(defaults: defaults),
+            localHistory
+        )
+        XCTAssertEqual(
+            TransferDirectoryHistoryStore.remoteHistory(defaults: defaults)[
+                remoteID.uuidString
+            ],
+            ["/srv/releases"]
+        )
+        XCTAssertEqual(
+            TransferRecentDirectoryResolver.inserting(
+                "/srv/releases",
+                into: ["/tmp", "/srv/releases"]
+            ),
+            ["/srv/releases", "/tmp"]
         )
     }
 

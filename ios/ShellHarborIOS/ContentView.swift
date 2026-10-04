@@ -512,9 +512,9 @@ private struct IOSPortForwardView: View {
                         }
                     }
                 }
-                ForEach(groupedRemoteIDs, id: \.self) { remoteID in
-                    Section(remoteName(for: remoteID)) {
-                        ForEach(ruleIndexes(for: remoteID), id: \.self) { index in
+                ForEach(groupedRules) { group in
+                    Section(remoteName(for: group.remoteID)) {
+                        ForEach(ruleIndexes(in: group), id: \.self) { index in
                             ruleEditor($forwardStore.rules[index])
                         }
                     }
@@ -575,25 +575,21 @@ private struct IOSPortForwardView: View {
         }
     }
 
-    private var groupedRemoteIDs: [UUID?] {
-        var values: [UUID?] = []
-        for rule in forwardStore.rules {
-            let remoteID = rule.selectedSessionID.flatMap { sessionID in
-                remoteStore.sessions.first(where: { $0.id == sessionID })?.remote.id
-            }
-            if !values.contains(where: { $0 == remoteID }) {
-                values.append(remoteID)
-            }
-        }
-        return values
+    private var groupedRules: [MobilePortForwardRuleGroup] {
+        MobilePortForwardPresentation.groups(
+            rules: forwardStore.rules,
+            sessionRemoteIDs: Dictionary(
+                uniqueKeysWithValues: remoteStore.sessions.map {
+                    ($0.id, $0.remote.id)
+                }
+            )
+        )
     }
 
-    private func ruleIndexes(for remoteID: UUID?) -> [Int] {
-        forwardStore.rules.indices.filter { index in
-            let ruleRemoteID = forwardStore.rules[index].selectedSessionID.flatMap { sessionID in
-                remoteStore.sessions.first(where: { $0.id == sessionID })?.remote.id
-            }
-            return ruleRemoteID == remoteID
+    private func ruleIndexes(in group: MobilePortForwardRuleGroup) -> [Int] {
+        let ids = Set(group.ruleIDs)
+        return forwardStore.rules.indices.filter { index in
+            ids.contains(forwardStore.rules[index].id)
         }
     }
 
@@ -637,10 +633,10 @@ private struct IOSPortForwardView: View {
         status: MobilePortForwardStore.Status
     ) {
         guard case let .running(port) = status else { return }
-        let host = rule.bindHost == "0.0.0.0" || rule.bindHost.isEmpty
-            ? "127.0.0.1"
-            : rule.bindHost
-        guard let url = URL(string: "http://\(host):\(port)/") else { return }
+        guard let url = MobilePortForwardPresentation.browserURL(
+            for: rule,
+            listeningPort: port
+        ) else { return }
         browserTarget = MobileBrowserTarget(url: url)
     }
 

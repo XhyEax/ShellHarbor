@@ -187,10 +187,8 @@ struct InteractiveTerminalRepresentable: NSViewRepresentable {
                     focusIfActive(view)
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                         [weak view] in
-                        guard let view, NSApp.isActive,
-                              view.window?.isKeyWindow == true else { return }
-                        view.propagatesSizeChangesToProcess = true
-                        view.reapplyCurrentWindowSize()
+                        (view as? SteadyCursorTerminalView)?
+                            .reapplyCurrentWindowSizeIfAuthoritative()
                     }
                 } else if view.window?.firstResponder === view {
                     view.window?.makeFirstResponder(nil)
@@ -300,9 +298,9 @@ struct InteractiveTerminalRepresentable: NSViewRepresentable {
             // become the foreground process.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
                 [weak view] in
-                guard isActive, NSApp.isActive,
-                      let view, view.window?.isKeyWindow == true else { return }
-                view.reapplyCurrentWindowSize()
+                guard isActive else { return }
+                (view as? SteadyCursorTerminalView)?
+                    .reapplyCurrentWindowSizeIfAuthoritative()
             }
             focusIfActive(view)
         }
@@ -436,9 +434,27 @@ final class SteadyCursorTerminalView: LocalProcessTerminalView {
     }
 
     private func updateResizeAuthority() {
-        propagatesSizeChangesToProcess = workspaceAllowsRemoteResize &&
-            sessionAllowsRemoteResize && NSApp.isActive &&
-            window?.isKeyWindow == true
+        propagatesSizeChangesToProcess = Self.shouldPropagateRemoteResize(
+            workspaceIsActive: workspaceAllowsRemoteResize,
+            macSessionIsActive: sessionAllowsRemoteResize,
+            applicationIsActive: NSApp.isActive,
+            windowIsKey: window?.isKeyWindow == true
+        )
+    }
+
+    static func shouldPropagateRemoteResize(
+        workspaceIsActive: Bool,
+        macSessionIsActive: Bool,
+        applicationIsActive: Bool,
+        windowIsKey: Bool
+    ) -> Bool {
+        workspaceIsActive && macSessionIsActive && applicationIsActive &&
+            windowIsKey
+    }
+
+    func reapplyCurrentWindowSizeIfAuthoritative() {
+        updateResizeAuthority()
+        reapplyCurrentWindowSize()
     }
 
     func configureScrollerAutoHide() {

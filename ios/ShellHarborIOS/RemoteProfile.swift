@@ -798,7 +798,7 @@ struct MobileSessionCacheSummary: Codable, Identifiable {
     }
 }
 
-private struct MobileSessionRestoration: Codable {
+struct MobileSessionRestoration: Codable {
     var sessionID: UUID
     var remote: MobileRemoteProfile
     var jumpRemote: MobileRemoteProfile?
